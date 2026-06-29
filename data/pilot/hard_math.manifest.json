@@ -1,0 +1,17 @@
+{
+  "count": 65,
+  "difficulty_hist": {
+    "easy": 18,
+    "med": 26,
+    "hard": 21
+  },
+  "dropped": 0,
+  "confidence_hist": {
+    "1.00": 65
+  },
+  "method": "All 65 items SymPy-computed (gold independently computed/verified by SymPy; gold_confidence=1.0). 0 items required self-consistency. 0 dropped. Methods span: finite sums/products (telescoping, geometric, arithmetic-geometric, harmonic, double sums, infinite series Basel/AGP), definite integrals (parts, substitution, Wallis), number theory (modexp, Legendre v_p, totient, divisor_sigma, modular inverse, Fibonacci gcd, digit/popcount), combinatorics (binomial identities, Catalan, derangements, domino tilings, coin-change DP, inclusion-exclusion, lattice paths/points, partitions, triangle counts, coprime pairs), linear algebra (tridiagonal/Vandermonde/GCD-matrix determinants), recurrences (iterated closed form), polynomial roots/Vieta, nested radicals & periodic continued fractions, exact trig.",
+  "sympy_computed": 65,
+  "self_consistency": 0,
+  "cluster": "hard_math",
+  "verifier": "math_verify"
+}

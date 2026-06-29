@@ -1,0 +1,17 @@
+{
+  "count": 71,
+  "difficulty_hist": {
+    "easy": 21,
+    "med": 28,
+    "hard": 22
+  },
+  "dropped": 0,
+  "method": "Novel competitive-programming problems generated from scratch (disjoint from LiveCodeBench/Codeforces/LeetCode). Per item: invent statement -> write Python reference solution -> craft 6-12 normal+edge test inputs -> EXECUTE reference in isolated subprocess (uv run python, mktemp temp dir, 5s/run timeout) to derive expected outputs (the gold) -> weak-test check (a trivially-wrong solution such as print 0 / echo input must FAIL >=1 test) -> KEEP only if reference ran cleanly on ALL tests (gold_confidence=1.0). JSONL written incrementally with flush+fsync per kept item (crash-safe). Final independent audit re-executed every reference against all 566 stored inputs: 0 mismatches. verifier=code_exec, io=stdin_stdout.",
+  "verifier": "code_exec",
+  "io": "stdin_stdout",
+  "tests_per_item": "6-12 (8 typical)",
+  "total_test_cases": 566,
+  "time_limit_s": 5,
+  "reexec_audit": "PASS (0 mismatches across all stored tests)",
+  "schema_audit": "PASS (0 errors; all ids+prompts unique)"
+}

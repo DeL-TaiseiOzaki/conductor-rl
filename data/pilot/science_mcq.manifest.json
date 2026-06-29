@@ -1,0 +1,13 @@
+{
+  "count": 65,
+  "difficulty_hist": {
+    "easy": 20,
+    "med": 26,
+    "hard": 19
+  },
+  "dropped": 0,
+  "confidence_hist": {
+    "1.0": 65
+  },
+  "method": "Novel graduate-level science MCQs across physics/chemistry/biology/CS-theory, biased to quantitative/derivable items. Every gold independently re-solved from scratch and computed with sympy (uv run --with sympy) in a temp dir; intended key compared against the independent solve; only items with agreement (gold_confidence=1.0) kept. Distractors are common-mistake values. Items are author-invented, not drawn from GPQA/MMLU."
+}

@@ -1,0 +1,61 @@
+# conductor-rl default config (v1). Values reflect locked design decisions.
+# See docs/reward-spec.md, docs/data-spec.md, and the vault design note.
+
+conductor:
+  model: "Qwen/Qwen3.5-4B"            # served locally (vLLM / SGLang)
+  system_prompt: "prompts/conductor_system_prompt.md"
+  max_subtasks: 5
+  controls_reasoning_level: false     # v1: executor fixes per-worker reasoning; Conductor does not choose it
+  self_answer_allowed: false          # v1: Conductor routes to workers 0-3 only (no self-as-worker)
+
+workers:                              # list index == model_id used in the workflow
+  - id: 0
+    slug: "deepseek/deepseek-v4-flash"
+    role: "fast/cheap; drafting, summarizing, aggregation"
+    latency_weight: 1.0
+    cost_out_per_1m: 0.18             # USD output price (cost proxy)
+    multimodal: false
+    openrouter_variant: ":nitro"      # prefer fastest provider
+  - id: 1
+    slug: "minimax/minimax-m3"
+    role: "multimodal (images/charts), tool use, web search"
+    latency_weight: 1.5
+    cost_out_per_1m: 1.20
+    multimodal: true
+    openrouter_variant: ":online"     # search-capable
+  - id: 2
+    slug: "deepseek/deepseek-v4-pro"
+    role: "strong, careful reasoning & coding"
+    latency_weight: 3.0
+    cost_out_per_1m: 0.87
+    multimodal: false
+    openrouter_variant: ""            # balanced (default)
+  - id: 3
+    slug: "z-ai/glm-5.2"
+    role: "strong reasoning/coding; diverse second solver (different lab)"
+    latency_weight: 3.0
+    cost_out_per_1m: 4.40
+    multimodal: false
+    openrouter_variant: ""
+
+reward:
+  w_corr: 1.0
+  w_fmt: 0.1
+  w_exec: 0.1
+  w_eff: 0.2
+  lambda_latency: 0.0                 # staged in AFTER accuracy is stable
+  mu_cost: 0.0                        # staged in after latency
+  code_s_correct: "fraction"          # "binary" | "fraction" (test-pass rate)
+  baseline: "strongest_worker_alone"  # b_eff normalized relative to this
+
+grpo:
+  group_size: 12                      # G in 8-16
+  batch_size: 256                     # 128-256
+  iterations: 200                     # 150-300
+  kl_coeff: 0.0                       # no KL regularization
+  optimizer: "adamw"
+  difficulty_matched_groups: true     # keep std>0 per group
+
+data:
+  pilot: "data/pilot/pilot.jsonl"
+  clusters: ["code", "science_mcq", "hard_math"]   # text-only Phase 1 (charts MM = pilot-2; SWE/Terminal = Phase 2)

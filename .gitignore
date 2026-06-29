@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.uv/
+*.egg-info/
+.pytest_cache/
+.ipynb_checkpoints/
+
+# Env / secrets
+.env
+*.key
+
+# Training artifacts / caches (keep data/pilot committed)
+/outputs/
+/checkpoints/
+/wandb/
+/runs/
+*.log
+hf_cache/
+
+# OS
+.DS_Store
+Thumbs.db
