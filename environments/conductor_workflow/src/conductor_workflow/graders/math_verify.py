@@ -1,26 +1,31 @@
-"""SymPy-based mathematical equivalence grader.
+"""Mathematical equivalence grader with LaTeX-aware parsing.
 
-Extracts the final answer from candidate text (preferring ``\\boxed{}``),
-compares to the gold answer via SymPy symbolic equivalence with a
-numerical tolerance fallback.  Handles equivalent forms such as
-``1/2`` vs ``0.5``, unsimplified expressions, etc.
+Uses the ``math-verify`` library as the primary comparison engine for
+robust LaTeX extraction (``\\boxed{\\frac{a}{b}}``, ``\\dfrac``,
+``\\sqrt``, etc.) and symbolic equivalence checking.  Falls back to
+hand-rolled SymPy comparison when ``math-verify`` cannot parse.
 
 A ``TinyVFallback`` protocol is provided for a lightweight LLM verifier
 that catches false negatives from symbolic comparison.  The synchronous
 ``grade_math`` never calls it (preserving Phase 1 behaviour).  The async
-``grade_math_async`` calls the fallback ONLY when SymPy is uncertain
-(can't parse or disagrees) and ``only_on_uncertain=True`` (default).
+``grade_math_async`` calls the fallback ONLY when the deterministic check
+is uncertain and ``only_on_uncertain=True`` (default).
 
-Pure (SymPy only) for the sync path; async path may invoke network.
+Pure (deterministic) for the sync path; async path may invoke network.
 """
 
 from __future__ import annotations
 
+import logging
 import re
 from typing import Protocol, runtime_checkable
 
+from math_verify import parse as mv_parse
+from math_verify import verify as mv_verify
 from sympy import Abs, N, Rational, oo, simplify, sympify
 from sympy.core.expr import Expr
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -28,14 +33,39 @@ from sympy.core.expr import Expr
 
 DEFAULT_TOLERANCE: float = 1e-6
 
+# Float rounding precision for math-verify (number of decimal places)
+_MV_FLOAT_ROUNDING: int = 6
+
+# Disable internal timeouts in math-verify so it is safe to call from
+# worker threads (GRPO training uses ThreadPoolExecutor).  The caller is
+# responsible for overall timeout management.
+_MV_PARSE_TIMEOUT: int = 0
+_MV_VERIFY_TIMEOUT: int | None = 0
+
 # Extraction patterns (most specific first)
+_BOXED_NESTED_RE = re.compile(r"\\boxed\{")
+# Simple (flat) boxed -- used only when brace-balanced extraction fails
 _BOXED_RE = re.compile(r"\\boxed\{([^}]+)\}")
 _DOLLAR_RE = re.compile(r"\$([^$]+)\$")
+_PAREN_LATEX_RE = re.compile(r"\\\((.+?)\\\)")
+_BRACKET_LATEX_RE = re.compile(r"\\\[(.+?)\\\]")
 _EQUALS_RE = re.compile(r"=\s*([^\s,;.]+)\s*$", re.MULTILINE)
+# Trailing number or simple fraction (e.g. "answer: 50/51", "the answer is 42")
+_TRAILING_EXPR_RE = re.compile(
+    r"(?:^|[\s:])(\-?\d+(?:\.\d+)?(?:/\d+(?:\.\d+)?)?)\s*\.?\s*$",
+    re.MULTILINE,
+)
+
+# LaTeX commands to normalise for the SymPy fallback
+_LATEX_FRAC_RE = re.compile(r"\\[dt]?frac\{([^}]*)\}\{([^}]*)\}")
+_LATEX_SQRT_RE = re.compile(r"\\sqrt\{([^}]*)\}")
+_LATEX_STRIP_COMMANDS = re.compile(
+    r"\\(?:left|right|displaystyle|text|mathrm|operatorname)"
+)
 
 
 # ---------------------------------------------------------------------------
-# TinyV fallback interface (stub -- not called in tests)
+# TinyV fallback interface (stub -- not called in sync path)
 # ---------------------------------------------------------------------------
 
 
@@ -60,40 +90,82 @@ class TinyVFallback(Protocol):
 
 
 # ---------------------------------------------------------------------------
+# Brace-balanced boxed extraction
+# ---------------------------------------------------------------------------
+
+
+def _extract_boxed_contents(text: str) -> list[str]:
+    r"""Extract contents of all ``\boxed{...}`` groups, handling nested braces.
+
+    Unlike a simple ``[^}]+`` regex, this correctly captures
+    ``\boxed{\frac{a}{b}}`` as ``\frac{a}{b}`` (not ``\frac{a``).
+    """
+    results: list[str] = []
+    for match in _BOXED_NESTED_RE.finditer(text):
+        start = match.end()  # position right after the opening '{'
+        depth = 1
+        pos = start
+        while pos < len(text) and depth > 0:
+            if text[pos] == "{":
+                depth += 1
+            elif text[pos] == "}":
+                depth -= 1
+            pos += 1
+        if depth == 0:
+            results.append(text[start : pos - 1])
+    return results
+
+
+# ---------------------------------------------------------------------------
 # Answer extraction
 # ---------------------------------------------------------------------------
 
 
 def extract_math_answer(text: str) -> str | None:
-    """Extract the final mathematical answer from *text*.
+    r"""Extract the final mathematical answer from *text*.
 
     Priority:
-    1. Last ``\\boxed{...}`` expression.
+    1. Last ``\boxed{...}`` expression (brace-balanced for nested LaTeX).
     2. Last inline ``$...$`` expression.
-    3. Last ``= <value>`` on its own line.
-    4. Last non-empty line (stripped).
+    3. Last ``\(...\)`` or ``\[...\]`` LaTeX math expression.
+    4. Last ``= <value>`` on its own line.
+    5. Last trailing number or fraction (e.g. ``answer: 50/51``).
+    6. Last non-empty line (stripped).
 
     Returns the raw string (not yet parsed by SymPy).
     """
     if not text:
         return None
 
-    # 1. \\boxed{...} -- take the last one (final answer)
-    matches = _BOXED_RE.findall(text)
-    if matches:
-        return matches[-1].strip()
+    # 1. \boxed{...} -- brace-balanced, take the last one (final answer)
+    boxed = _extract_boxed_contents(text)
+    if boxed:
+        return boxed[-1].strip()
 
     # 2. Inline $...$
     matches = _DOLLAR_RE.findall(text)
     if matches:
         return matches[-1].strip()
 
-    # 3. = <value> at end of a line
+    # 3. \(...\) or \[...\]
+    matches = _PAREN_LATEX_RE.findall(text)
+    if matches:
+        return matches[-1].strip()
+    matches = _BRACKET_LATEX_RE.findall(text)
+    if matches:
+        return matches[-1].strip()
+
+    # 4. = <value> at end of a line
     matches = _EQUALS_RE.findall(text)
     if matches:
         return matches[-1].strip()
 
-    # 4. Last non-empty line
+    # 5. Trailing number/fraction (handles "answer: 50/51")
+    matches = _TRAILING_EXPR_RE.findall(text)
+    if matches:
+        return matches[-1].strip()
+
+    # 6. Last non-empty line
     lines = [line.strip() for line in text.strip().splitlines() if line.strip()]
     if lines:
         return lines[-1]
@@ -102,24 +174,104 @@ def extract_math_answer(text: str) -> str | None:
 
 
 # ---------------------------------------------------------------------------
-# SymPy comparison
+# math-verify primary path
+# ---------------------------------------------------------------------------
+
+
+def _try_math_verify(candidate_text: str, gold_answer: str) -> bool | None:
+    """Compare candidate and gold using the ``math-verify`` library.
+
+    Returns ``True`` (equivalent), ``False`` (definitely not equivalent),
+    or ``None`` (could not parse one or both -- uncertain).
+    """
+    try:
+        parsed_candidate = mv_parse(
+            candidate_text,
+            parsing_timeout=_MV_PARSE_TIMEOUT,
+        )
+        parsed_gold = mv_parse(
+            gold_answer,
+            parsing_timeout=_MV_PARSE_TIMEOUT,
+        )
+    except Exception:
+        logger.debug("math-verify parse raised an exception", exc_info=True)
+        return None
+
+    if not parsed_candidate or not parsed_gold:
+        return None
+
+    try:
+        return mv_verify(
+            gold=parsed_gold,
+            target=parsed_candidate,
+            float_rounding=_MV_FLOAT_ROUNDING,
+            timeout_seconds=_MV_VERIFY_TIMEOUT,
+        )
+    except Exception:
+        logger.debug("math-verify verify raised an exception", exc_info=True)
+        return None
+
+
+# ---------------------------------------------------------------------------
+# LaTeX normalisation (for SymPy fallback)
+# ---------------------------------------------------------------------------
+
+
+def _normalize_latex(expr_str: str) -> str:
+    r"""Normalise LaTeX markup into a SymPy-parseable string.
+
+    Transforms:
+    - ``\frac{a}{b}`` / ``\dfrac`` / ``\tfrac``  ->  ``(a)/(b)``
+    - ``\sqrt{x}``  ->  ``sqrt(x)``
+    - Strips ``\left``, ``\right``, ``\displaystyle``, etc.
+    - Strips surrounding ``$``, ``\(``, ``\)``, ``\[``, ``\]``
+    - Replaces ``\cdot`` / ``\times`` with ``*``
+    - Removes remaining ``\`` and ``{`` / ``}``
+    """
+    s = expr_str.strip()
+
+    # Strip surrounding math delimiters
+    if s.startswith("$") and s.endswith("$"):
+        s = s[1:-1].strip()
+    if s.startswith("\\(") and s.endswith("\\)"):
+        s = s[2:-2].strip()
+    if s.startswith("\\[") and s.endswith("\\]"):
+        s = s[2:-2].strip()
+
+    # \frac{a}{b} -> (a)/(b)
+    while _LATEX_FRAC_RE.search(s):
+        s = _LATEX_FRAC_RE.sub(r"(\1)/(\2)", s)
+
+    # \sqrt{x} -> sqrt(x)
+    s = _LATEX_SQRT_RE.sub(r"sqrt(\1)", s)
+
+    # Strip decorative commands
+    s = _LATEX_STRIP_COMMANDS.sub("", s)
+
+    # \cdot, \times -> *
+    s = s.replace("\\cdot", "*").replace("\\times", "*")
+
+    # Remove remaining backslashes and braces
+    s = s.replace("\\", "").replace("{", "").replace("}", "")
+
+    return s.strip()
+
+
+# ---------------------------------------------------------------------------
+# SymPy comparison (fallback)
 # ---------------------------------------------------------------------------
 
 
 def _safe_sympify(expr_str: str) -> Expr | None:
     """Attempt to parse *expr_str* as a SymPy expression.
 
+    Applies LaTeX normalisation before parsing.
     Returns None on failure (unparseable input).
     """
     if not expr_str:
         return None
 
-    # Clean common LaTeX artifacts
-    cleaned = expr_str.replace("\\", "").replace("{", "").replace("}", "")
-    cleaned = cleaned.replace("dfrac", "").replace("frac", "")
-    cleaned = cleaned.replace("left", "").replace("right", "")
-    cleaned = cleaned.replace("cdot", "*").replace("times", "*")
-    cleaned = cleaned.strip()
+    cleaned = _normalize_latex(expr_str)
 
     if not cleaned:
         return None
@@ -132,7 +284,6 @@ def _safe_sympify(expr_str: str) -> Expr | None:
 
     # Try as a Python literal (handles "50/51" etc.)
     try:
-        # Rational("50/51") handles fraction strings
         return Rational(cleaned)
     except Exception:
         pass
@@ -192,6 +343,56 @@ def _symbolic_equal(
 
 
 # ---------------------------------------------------------------------------
+# Core grading logic (shared by sync and async paths)
+# ---------------------------------------------------------------------------
+
+
+def _deterministic_grade(
+    candidate_text: str,
+    gold_answer: str,
+    tolerance: float = DEFAULT_TOLERANCE,
+) -> float | None:
+    """Run the deterministic (no-network) grading pipeline.
+
+    Returns:
+        ``1.0`` if equivalent, ``0.0`` if definitely not equivalent,
+        or ``None`` if uncertain (both paths failed to parse).
+    """
+    # -- Layer 1: math-verify (LaTeX-aware, handles \frac, \sqrt, etc.) --
+    mv_result = _try_math_verify(candidate_text, gold_answer)
+    if mv_result is True:
+        return 1.0
+    if mv_result is False:
+        # math-verify parsed both but says not equal.  Still try SymPy
+        # fallback in case of edge-case disagreement, but treat this as
+        # a strong signal.
+        pass
+
+    # -- Layer 2: hand-rolled extraction + SymPy --
+    extracted = extract_math_answer(candidate_text)
+    if extracted is None:
+        # Nothing extractable and math-verify also failed
+        if mv_result is False:
+            return 0.0
+        return None
+
+    candidate_expr = _safe_sympify(extracted)
+    gold_expr = _safe_sympify(gold_answer)
+
+    if candidate_expr is None or gold_expr is None:
+        # Could not parse -- uncertain unless math-verify already decided
+        if mv_result is False:
+            return 0.0
+        return None
+
+    if _symbolic_equal(candidate_expr, gold_expr, tolerance=tolerance):
+        return 1.0
+
+    # Both layers say not equal (or SymPy says no)
+    return 0.0
+
+
+# ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 
@@ -203,34 +404,26 @@ def grade_math(
     tolerance: float = DEFAULT_TOLERANCE,
     tiny_v_fallback: TinyVFallback | None = None,
 ) -> float:
-    """Grade a mathematical answer via SymPy equivalence.
+    """Grade a mathematical answer via deterministic equivalence check.
+
+    Uses ``math-verify`` (LaTeX-aware) as the primary engine, with a
+    SymPy fallback.  The sync path never calls the LLM fallback.
 
     Args:
         candidate_text: The model's full response text.
-        gold_answer: The gold answer string (SymPy-parseable).
+        gold_answer: The gold answer string.
         tolerance: Numerical tolerance for equivalence check.
         tiny_v_fallback: Optional LLM fallback verifier.
-            **Not called in current implementation** -- interface only.
+            **Not called in sync path** -- interface preserved for compat.
 
     Returns:
         ``s_correct``: 1.0 if equivalent, else 0.0.
     """
-    extracted = extract_math_answer(candidate_text)
-    if extracted is None:
-        return 0.0
+    result = _deterministic_grade(candidate_text, gold_answer, tolerance)
+    if result is not None:
+        return result
 
-    candidate_expr = _safe_sympify(extracted)
-    gold_expr = _safe_sympify(gold_answer)
-
-    if candidate_expr is None or gold_expr is None:
-        # Cannot parse one or both -- future TinyV fallback would go here.
-        # tiny_v_fallback is intentionally NOT called (no network in tests).
-        return 0.0
-
-    if _symbolic_equal(candidate_expr, gold_expr, tolerance=tolerance):
-        return 1.0
-
-    # Sync path: never calls the fallback (no network).
+    # Uncertain: sync path never calls the fallback (no network).
     return 0.0
 
 
@@ -249,43 +442,38 @@ async def grade_math_async(
 ) -> float:
     """Grade a mathematical answer, with optional async LLM fallback.
 
-    The SymPy path runs first (synchronously).  If SymPy confirms
-    equivalence, returns 1.0 immediately.  The fallback is invoked
-    ONLY when SymPy is uncertain (unparseable or disagrees) and
-    ``only_on_uncertain`` is True and a fallback is provided.
+    The deterministic path (math-verify + SymPy) runs first.  If it
+    confirms equivalence, returns 1.0 immediately.  The fallback is
+    invoked ONLY when the deterministic check is uncertain (cannot parse)
+    and ``only_on_uncertain`` is True and a fallback is provided.
 
     Args:
         candidate_text: The model's full response text.
         gold_answer: The gold answer string.
-        tolerance: Numerical tolerance for SymPy comparison.
+        tolerance: Numerical tolerance for comparison.
         tiny_v_fallback: Optional async LLM fallback verifier.
-        only_on_uncertain: Only call fallback when SymPy can't decide.
+        only_on_uncertain: Only call fallback when deterministic check
+            cannot decide.
 
     Returns:
         ``s_correct``: 1.0 if equivalent, else 0.0.
     """
-    extracted = extract_math_answer(candidate_text)
-    if extracted is None:
-        return 0.0
+    result = _deterministic_grade(candidate_text, gold_answer, tolerance)
 
-    candidate_expr = _safe_sympify(extracted)
-    gold_expr = _safe_sympify(gold_answer)
+    deterministic_uncertain = result is None
 
-    sympy_uncertain = candidate_expr is None or gold_expr is None
+    if result is not None and result == 1.0:
+        return 1.0
 
-    if not sympy_uncertain:
-        assert candidate_expr is not None  # for type checker
-        assert gold_expr is not None
-        if _symbolic_equal(candidate_expr, gold_expr, tolerance=tolerance):
-            return 1.0
-        # SymPy says not equal -- this is also "uncertain" for fallback
-        sympy_uncertain = True
-
-    # Fallback: call the judge if available and appropriate
-    if tiny_v_fallback is not None and (not only_on_uncertain or sympy_uncertain):
+    # If deterministic says 0.0 or is uncertain, consider fallback
+    if tiny_v_fallback is not None and (
+        not only_on_uncertain or deterministic_uncertain
+    ):
+        extracted = extract_math_answer(candidate_text)
+        candidate_for_judge = extracted if extracted is not None else candidate_text
         try:
             is_equiv = await tiny_v_fallback.check_equivalence(
-                candidate_answer=extracted,
+                candidate_answer=candidate_for_judge,
                 gold_answer=gold_answer,
             )
             return 1.0 if is_equiv else 0.0
@@ -293,4 +481,6 @@ async def grade_math_async(
             # Judge failure -> conservative: not equivalent
             return 0.0
 
+    if result is not None:
+        return result
     return 0.0

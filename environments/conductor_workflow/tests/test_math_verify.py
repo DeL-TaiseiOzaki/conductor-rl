@@ -4,9 +4,14 @@ from __future__ import annotations
 
 from typing import Any
 
+import pytest
+
 from conductor_workflow.graders.math_verify import (
+    _extract_boxed_contents,
+    _normalize_latex,
     extract_math_answer,
     grade_math,
+    grade_math_async,
 )
 
 # ---------------------------------------------------------------------------
@@ -183,3 +188,222 @@ class TestGradeMathPilotData:
             assert expr is not None, (
                 f"{item['id']} gold {gold!r} is not SymPy-parseable"
             )
+
+
+# ---------------------------------------------------------------------------
+# Brace-balanced boxed extraction
+# ---------------------------------------------------------------------------
+
+
+class TestExtractBoxedContents:
+    """Test brace-balanced extraction from \\boxed{...}."""
+
+    def test_simple_boxed(self) -> None:
+        assert _extract_boxed_contents(r"\boxed{42}") == ["42"]
+
+    def test_nested_frac(self) -> None:
+        result = _extract_boxed_contents(r"\boxed{\frac{625}{861}}")
+        assert result == [r"\frac{625}{861}"]
+
+    def test_deeply_nested(self) -> None:
+        result = _extract_boxed_contents(r"\boxed{\frac{\sqrt{2}}{3}}")
+        assert result == [r"\frac{\sqrt{2}}{3}"]
+
+    def test_multiple_boxed_returns_all(self) -> None:
+        text = r"First \boxed{1} then \boxed{\frac{2}{3}}"
+        result = _extract_boxed_contents(text)
+        assert len(result) == 2
+        assert result[0] == "1"
+        assert result[1] == r"\frac{2}{3}"
+
+    def test_no_boxed_returns_empty(self) -> None:
+        assert _extract_boxed_contents("no boxed here") == []
+
+
+# ---------------------------------------------------------------------------
+# LaTeX normalisation
+# ---------------------------------------------------------------------------
+
+
+class TestNormalizeLatex:
+    """Test LaTeX-to-SymPy normalisation."""
+
+    def test_frac(self) -> None:
+        assert _normalize_latex(r"\frac{50}{51}") == "(50)/(51)"
+
+    def test_dfrac(self) -> None:
+        assert _normalize_latex(r"\dfrac{1}{2}") == "(1)/(2)"
+
+    def test_tfrac(self) -> None:
+        assert _normalize_latex(r"\tfrac{3}{4}") == "(3)/(4)"
+
+    def test_sqrt(self) -> None:
+        assert _normalize_latex(r"\sqrt{2}") == "sqrt(2)"
+
+    def test_strip_dollar(self) -> None:
+        assert _normalize_latex(r"$50/51$") == "50/51"
+
+    def test_strip_paren_latex(self) -> None:
+        assert _normalize_latex(r"\(50/51\)") == "50/51"
+
+    def test_strip_bracket_latex(self) -> None:
+        assert _normalize_latex(r"\[50/51\]") == "50/51"
+
+    def test_cdot_and_times(self) -> None:
+        result = _normalize_latex(r"3 \cdot 5 \times 2")
+        assert result == "3 * 5 * 2"
+
+    def test_strip_left_right(self) -> None:
+        result = _normalize_latex(r"\left(\frac{1}{2}\right)")
+        assert result == "((1)/(2))"
+
+    def test_plain_string_unchanged(self) -> None:
+        assert _normalize_latex("50/51") == "50/51"
+
+
+# ---------------------------------------------------------------------------
+# LaTeX extraction regression (extract_math_answer)
+# ---------------------------------------------------------------------------
+
+
+class TestExtractMathAnswerLatex:
+    """Extraction of LaTeX forms that previously failed."""
+
+    def test_boxed_frac_nested_braces(self) -> None:
+        """Boxed \\frac must capture the full expression including inner braces."""
+        text = r"\boxed{\frac{625}{861}}"
+        result = extract_math_answer(text)
+        assert result == r"\frac{625}{861}"
+
+    def test_boxed_dfrac(self) -> None:
+        text = r"\boxed{\dfrac{1}{2}}"
+        result = extract_math_answer(text)
+        assert result == r"\dfrac{1}{2}"
+
+    def test_boxed_sqrt(self) -> None:
+        text = r"\boxed{\sqrt{2}}"
+        result = extract_math_answer(text)
+        assert result == r"\sqrt{2}"
+
+    def test_paren_latex_fallback(self) -> None:
+        r"""Text with \(...\) but no boxed should extract the math."""
+        text = r"The answer is \(\frac{50}{51}\)"
+        result = extract_math_answer(text)
+        assert result is not None
+        assert "50" in result and "51" in result
+
+    def test_trailing_fraction_no_boxed(self) -> None:
+        """Plain 'answer: 50/51' should extract 50/51."""
+        text = "answer: 50/51"
+        result = extract_math_answer(text)
+        assert result is not None
+        assert "50/51" in result
+
+
+# ---------------------------------------------------------------------------
+# LaTeX grading regression (the reported bug)
+# ---------------------------------------------------------------------------
+
+
+class TestGradeMathLatexRegression:
+    r"""Regression tests for LaTeX \frac, \dfrac, \sqrt, etc.
+
+    These are the exact cases from the bug report that previously returned
+    0.0 (false negative) instead of 1.0.
+    """
+
+    def test_boxed_frac_625_861(self) -> None:
+        """Bug case 1: \\boxed{\\frac{625}{861}} vs '625/861'."""
+        candidate = r"...\boxed{\frac{625}{861}}"
+        assert grade_math(candidate, "625/861") == 1.0
+
+    def test_boxed_plain_625_861(self) -> None:
+        """Bug case 2: \\boxed{625/861} vs '625/861' (was already passing)."""
+        candidate = r"\boxed{625/861}"
+        assert grade_math(candidate, "625/861") == 1.0
+
+    def test_boxed_frac_50_51(self) -> None:
+        """Bug case 3: \\boxed{\\frac{50}{51}} vs '50/51'."""
+        candidate = r"\boxed{\frac{50}{51}}"
+        assert grade_math(candidate, "50/51") == 1.0
+
+    def test_no_boxed_plain_fraction(self) -> None:
+        """Bug case 4: 'answer: 50/51' vs '50/51' (no \\boxed)."""
+        candidate = "answer: 50/51"
+        assert grade_math(candidate, "50/51") == 1.0
+
+    def test_boxed_dfrac_half_vs_decimal(self) -> None:
+        r"""\\boxed{\\dfrac{1}{2}} vs '0.5'."""
+        candidate = r"\boxed{\dfrac{1}{2}}"
+        assert grade_math(candidate, "0.5") == 1.0
+
+    def test_boxed_sqrt2_vs_power(self) -> None:
+        r"""\\boxed{\\sqrt{2}} vs '2**0.5' within tolerance."""
+        candidate = r"\boxed{\sqrt{2}}"
+        assert grade_math(candidate, "2**0.5") == 1.0
+
+    def test_wrong_frac_still_zero(self) -> None:
+        """A wrong LaTeX fraction must still score 0.0."""
+        candidate = r"\boxed{\frac{49}{51}}"
+        assert grade_math(candidate, "50/51") == 0.0
+
+    def test_wrong_dfrac_still_zero(self) -> None:
+        """A wrong dfrac must still score 0.0."""
+        candidate = r"\boxed{\dfrac{1}{3}}"
+        assert grade_math(candidate, "0.5") == 0.0
+
+    def test_deeply_nested_latex(self) -> None:
+        r"""\\boxed{\\frac{\\sqrt{2}}{3}} should be graded correctly."""
+        candidate = r"\boxed{\frac{\sqrt{2}}{3}}"
+        # sqrt(2)/3 ~ 0.4714
+        assert grade_math(candidate, "0.4714045207910317") == 1.0
+
+    def test_latex_with_left_right(self) -> None:
+        r"""\\left and \\right delimiters should not break grading."""
+        candidate = r"\boxed{\left(\frac{1}{2}\right)}"
+        assert grade_math(candidate, "0.5") == 1.0
+
+    def test_dollar_wrapped_frac(self) -> None:
+        """Inline $\\frac{a}{b}$ without \\boxed."""
+        candidate = r"The answer is $\frac{50}{51}$"
+        assert grade_math(candidate, "50/51") == 1.0
+
+    def test_long_response_with_boxed_frac(self) -> None:
+        """Realistic long response ending with boxed LaTeX fraction."""
+        candidate = (
+            "We start by decomposing the sum:\n"
+            r"$\sum_{k=2}^{51} \frac{1}{k(k+1)} = \sum_{k=2}^{51}"
+            r"\left(\frac{1}{k} - \frac{1}{k+1}\right)$"
+            "\n\nTelescoping gives:\n"
+            r"$= \frac{1}{2} - \frac{1}{52} = \frac{25}{52}$"
+            "\n\nTherefore the answer is "
+            r"$\boxed{\frac{625}{861}}$"
+        )
+        assert grade_math(candidate, "625/861") == 1.0
+
+
+# ---------------------------------------------------------------------------
+# Async path regression
+# ---------------------------------------------------------------------------
+
+
+class TestGradeMathAsyncLatex:
+    """Verify async path also handles LaTeX correctly."""
+
+    @pytest.mark.asyncio
+    async def test_boxed_frac_async(self) -> None:
+        """Async path: \\boxed{\\frac{50}{51}} vs '50/51'."""
+        result = await grade_math_async(r"\boxed{\frac{50}{51}}", "50/51")
+        assert result == 1.0
+
+    @pytest.mark.asyncio
+    async def test_no_boxed_async(self) -> None:
+        """Async path: 'answer: 50/51' vs '50/51'."""
+        result = await grade_math_async("answer: 50/51", "50/51")
+        assert result == 1.0
+
+    @pytest.mark.asyncio
+    async def test_wrong_answer_async(self) -> None:
+        """Async path: wrong answer still 0.0."""
+        result = await grade_math_async(r"\boxed{\frac{49}{51}}", "50/51")
+        assert result == 0.0
