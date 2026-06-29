@@ -21,8 +21,9 @@ venv/
 *.log
 hf_cache/
 
-# Agent harness logs
+# Agent harness logs / checkpoints (PROGRESS.md is the tracked rolling summary)
 .claude/logs/
+.claude/checkpoints/
 
 # OS
 .DS_Store
