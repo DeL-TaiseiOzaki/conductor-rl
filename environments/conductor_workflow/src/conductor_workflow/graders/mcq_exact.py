@@ -9,7 +9,8 @@ Extraction strategy (checked in priority order):
 2. ``answer is (X)`` / ``answer is X`` -- explicit declaration
 3. ``The answer is X`` -- common phrasing
 4. ``**X**`` -- bold markdown letter at end
-5. Trailing standalone capital letter (last non-whitespace char
+5. Option-label on last line: ``A) ...``, ``A. ...``, ``A: ...``
+6. Trailing standalone capital letter (last non-whitespace char
    on the last non-empty line, if it is A-D)
 
 False negatives are mostly extraction failures (per data-spec);
@@ -36,6 +37,9 @@ _THE_ANSWER_IS_RE = re.compile(
     r"[Tt]he\s+answer\s+is\s*:?\s*\(?([A-Da-d])\)?", re.IGNORECASE
 )
 _BOLD_LETTER_RE = re.compile(r"\*\*([A-Da-d])\*\*")
+# Option-label form: "A) ...", "A. ...", "A: ..." at the start of a line
+# Captures a letter immediately followed by ), ., or : (optionally with space).
+_OPTION_LABEL_RE = re.compile(r"(?:^|\n)\s*([A-Da-d])\s*[).:]", re.MULTILINE)
 _OPTION_LETTER_RE = re.compile(r"(?:^|\n)\s*\(?([A-Da-d])\)?\s*$")
 
 
@@ -76,8 +80,15 @@ def extract_letter(text: str) -> str | None:
     if matches:
         return matches[-1].upper()
 
-    # 5. Trailing standalone letter on last non-empty line
+    # 5. Option-label on the last non-empty line: "A) ...", "A. ...", "A: ..."
     lines = [line.strip() for line in text.strip().splitlines() if line.strip()]
+    if lines:
+        last_line = lines[-1]
+        m = _OPTION_LABEL_RE.search("\n" + last_line)
+        if m:
+            return m.group(1).upper()
+
+    # 6. Trailing standalone letter on last non-empty line
     if lines:
         last_line = lines[-1]
         # Check if last line is just a single letter (possibly with parens/period)

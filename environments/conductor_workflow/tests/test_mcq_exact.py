@@ -136,3 +136,59 @@ class TestGradeMcqPilotData:
             assert item["gold"] in {"A", "B", "C", "D"}, (
                 f"{item['id']} has invalid gold: {item['gold']!r}"
             )
+
+
+# ---------------------------------------------------------------------------
+# Option-label extraction (Bug 2 regression)
+# ---------------------------------------------------------------------------
+
+
+class TestExtractLetterOptionLabel:
+    """Extraction of option-label forms: A) ..., A. ..., A: ..., (A), **A**."""
+
+    def test_option_paren_with_text(self) -> None:
+        """A) 40% on last line -> A."""
+        assert extract_letter("A) 40%") == "A"
+
+    def test_option_dot_with_text(self) -> None:
+        """A. foo on last line -> A."""
+        assert extract_letter("A. foo") == "A"
+
+    def test_option_colon(self) -> None:
+        """A: bar on last line -> A."""
+        assert extract_letter("A: bar") == "A"
+
+    def test_paren_wrapped(self) -> None:
+        """(A) -> A."""
+        assert extract_letter("(A)") == "A"
+
+    def test_bold_letter(self) -> None:
+        """**B** -> B."""
+        assert extract_letter("**B**") == "B"
+
+    def test_answer_is_c(self) -> None:
+        """The answer is C -> C."""
+        assert extract_letter("The answer is C") == "C"
+
+    def test_trailing_d(self) -> None:
+        """Trailing D on its own line -> D."""
+        assert extract_letter("Analysis complete:\nD") == "D"
+
+
+class TestGradeMcqOptionLabel:
+    """grade_mcq integration with option-label forms."""
+
+    def test_option_paren_correct(self) -> None:
+        assert grade_mcq("A) 40%", "A") == 1.0
+
+    def test_option_paren_wrong(self) -> None:
+        assert grade_mcq("A) 40%", "B") == 0.0
+
+    def test_no_letter_scores_zero(self) -> None:
+        assert grade_mcq("I have no idea about this question.", "A") == 0.0
+
+    def test_dot_label_correct(self) -> None:
+        assert grade_mcq("B. is correct because ...", "B") == 1.0
+
+    def test_colon_label_correct(self) -> None:
+        assert grade_mcq("C: the kinetic energy", "C") == 1.0

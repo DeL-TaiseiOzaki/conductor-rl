@@ -7,6 +7,7 @@ from typing import Any
 import pytest
 
 from conductor_workflow.graders.code_exec import (
+    extract_code,
     grade_code,
     normalize_output,
 )
@@ -193,3 +194,107 @@ class TestGradeCodePilotData:
         tests = code_items[1]["verifier_spec"]["tests"]
         result = grade_code(correct_code, tests)
         assert result.s_correct == pytest.approx(1.0)
+
+
+# ---------------------------------------------------------------------------
+# extract_code helper
+# ---------------------------------------------------------------------------
+
+
+class TestExtractCode:
+    """Tests for extract_code() markdown fence extraction."""
+
+    def test_python_tagged_block_extracted(self) -> None:
+        # Arrange
+        text = "Here is my solution:\n```python\nprint(input())\n```\nThis should work."
+
+        # Act
+        result = extract_code(text)
+
+        # Assert
+        assert result == "print(input())"
+
+    def test_py_tag_variant(self) -> None:
+        text = "Solution:\n```py\nx = 1\nprint(x)\n```\n"
+        result = extract_code(text)
+        assert result == "x = 1\nprint(x)"
+
+    def test_untagged_block_extracted(self) -> None:
+        text = "Try this:\n```\nprint('hello')\n```\n"
+        result = extract_code(text)
+        assert result == "print('hello')"
+
+    def test_multiple_blocks_picks_last_python(self) -> None:
+        text = (
+            "First attempt:\n"
+            "```python\nprint('wrong')\n```\n"
+            "Corrected:\n"
+            "```python\nprint('right')\n```\n"
+        )
+        result = extract_code(text)
+        assert result == "print('right')"
+
+    def test_multiple_mixed_blocks_picks_python(self) -> None:
+        text = "Config:\n```json\n{}\n```\nCode:\n```python\nprint(42)\n```\n"
+        result = extract_code(text)
+        assert result == "print(42)"
+
+    def test_no_fence_returns_input(self) -> None:
+        bare = "print(input())"
+        result = extract_code(bare)
+        assert result == bare
+
+    def test_empty_string_returns_empty(self) -> None:
+        assert extract_code("") == ""
+
+    def test_untagged_largest_block_selected(self) -> None:
+        text = "```\na\n```\n```\nfoo\nbar\nbaz\n```\n"
+        result = extract_code(text)
+        assert result == "foo\nbar\nbaz"
+
+
+# ---------------------------------------------------------------------------
+# Fenced-block grading integration
+# ---------------------------------------------------------------------------
+
+
+ECHO_CODE = "print(input())"
+ECHO_TESTS: list[dict[str, str]] = [
+    {"input": "hello\n", "output": "hello"},
+    {"input": "world\n", "output": "world"},
+]
+
+
+class TestGradeCodeFencedInput:
+    """grade_code on pre-extracted fenced blocks should match bare code."""
+
+    def test_fenced_python_grades_same_as_bare(self) -> None:
+        # Arrange
+        fenced = f"Here is the solution:\n```python\n{ECHO_CODE}\n```\n"
+        extracted = extract_code(fenced)
+
+        # Act
+        result_bare = grade_code(ECHO_CODE, ECHO_TESTS)
+        result_extracted = grade_code(extracted, ECHO_TESTS)
+
+        # Assert
+        assert result_bare.s_correct == pytest.approx(1.0)
+        assert result_extracted.s_correct == pytest.approx(1.0)
+
+    def test_fenced_py_tag_grades_correctly(self) -> None:
+        fenced = f"```py\n{ECHO_CODE}\n```\n"
+        extracted = extract_code(fenced)
+        result = grade_code(extracted, ECHO_TESTS)
+        assert result.s_correct == pytest.approx(1.0)
+
+    def test_raw_fenced_without_extraction_fails(self) -> None:
+        """Without extract_code, fenced text causes SyntaxError -> 0."""
+        fenced = f"Here:\n```python\n{ECHO_CODE}\n```\n"
+        result = grade_code(fenced, ECHO_TESTS)
+        assert result.s_correct == pytest.approx(0.0)
+
+    def test_prose_only_no_code_scores_zero(self) -> None:
+        prose = "I think the answer involves printing the input back."
+        extracted = extract_code(prose)
+        result = grade_code(extracted, ECHO_TESTS)
+        assert result.s_correct == pytest.approx(0.0)

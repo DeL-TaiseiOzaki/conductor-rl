@@ -6,8 +6,8 @@ Each grader computes ``s_correct`` for its cluster type:
     - math_verify : SymPy equivalence (+ TinyV LLM fallback stub)
 """
 
-from conductor_workflow.graders.code_exec import grade_code
+from conductor_workflow.graders.code_exec import extract_code, grade_code
 from conductor_workflow.graders.math_verify import grade_math, grade_math_async
 from conductor_workflow.graders.mcq_exact import grade_mcq
 
-__all__ = ["grade_code", "grade_mcq", "grade_math", "grade_math_async"]
+__all__ = ["extract_code", "grade_code", "grade_mcq", "grade_math", "grade_math_async"]

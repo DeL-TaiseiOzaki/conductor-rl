@@ -23,7 +23,7 @@ from conductor_workflow.config import (
     load_config,
 )
 from conductor_workflow.executor import ExecutionResult, execute_dag
-from conductor_workflow.graders.code_exec import grade_code
+from conductor_workflow.graders.code_exec import extract_code, grade_code
 from conductor_workflow.graders.math_verify import grade_math_async
 from conductor_workflow.graders.mcq_exact import grade_mcq
 from conductor_workflow.judge import NemotronJudge
@@ -249,7 +249,8 @@ async def _grade_correctness(
     if verifier == "code_exec":
         tests = verifier_spec.get("tests", [])
         time_limit = verifier_spec.get("time_limit_s", 5)
-        result = grade_code(final_output, tests, time_limit_s=time_limit)
+        candidate_code = extract_code(final_output)
+        result = grade_code(candidate_code, tests, time_limit_s=time_limit)
         if config.code_s_correct == "fraction":
             return result.s_correct
         return 1.0 if result.all_pass else 0.0

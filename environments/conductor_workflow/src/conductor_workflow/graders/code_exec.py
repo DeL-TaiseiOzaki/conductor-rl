@@ -44,6 +44,7 @@ Pure (apart from subprocess invocation), synchronous.
 from __future__ import annotations
 
 import os
+import re
 import resource
 import subprocess
 import sys
@@ -58,6 +59,47 @@ DEFAULT_TIME_LIMIT_S: int = 5
 DEFAULT_MEMORY_LIMIT_BYTES: int = 256 * 1024 * 1024  # 256 MiB
 MAX_CHILD_PROCESSES: int = 4  # small but non-zero for shared hosts
 SANDBOX_CWD: str = "/tmp"
+
+# Regex for fenced code blocks: ```lang\n...\n```
+_FENCED_BLOCK_RE = re.compile(
+    r"```[ \t]*([\w+-]*)[ \t]*\n(.*?)```",
+    re.DOTALL,
+)
+
+# Language tags recognised as Python
+_PYTHON_TAGS: frozenset[str] = frozenset({"python", "py", "python3", "py3"})
+
+
+# ---------------------------------------------------------------------------
+# Code extraction helper
+# ---------------------------------------------------------------------------
+
+
+def extract_code(text: str) -> str:
+    """Extract Python source from worker output that may contain markdown fences.
+
+    Strategy (in priority order):
+    1. If one or more **python-tagged** fenced blocks exist, return the LAST one.
+    2. Else if any un-tagged / other-language fenced blocks exist, return the
+       LARGEST (by character count).
+    3. Else return the input unchanged (assumed to be bare source already).
+    """
+    if not text:
+        return text
+
+    blocks = _FENCED_BLOCK_RE.findall(text)
+    if not blocks:
+        return text
+
+    # blocks is list of (lang_tag, content)
+    python_blocks = [content for tag, content in blocks if tag.lower() in _PYTHON_TAGS]
+    if python_blocks:
+        return python_blocks[-1].strip()
+
+    # No python-tagged block — pick the largest block by character count
+    all_contents = [content for _, content in blocks]
+    largest = max(all_contents, key=len)
+    return largest.strip()
 
 
 # ---------------------------------------------------------------------------
