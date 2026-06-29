@@ -2,7 +2,7 @@
 
 Conductor-RL: Multi-agent workflow orchestration environment for GRPO training.
 
-**Hub name**: `DeL-TaiseiOzaki/conductor-workflow`
+**Hub name**: `o-taisei/conductor-workflow`
 
 ## What this package is
 

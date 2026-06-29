@@ -20,7 +20,7 @@ win on the cost-efficiency frontier and on absolute scores where OSS is near-fro
 
 - A `verifiers`-library **Environment** (`vf.SingleTurnEnv`) implementing the Conductor task: one model
   generation = a workflow DAG; async reward parses → executes the DAG over OpenRouter workers → grades → tiered reward.
-- Publishing that environment to the **Prime Intellect Environments Hub** (`DeL-TaiseiOzaki/conductor-workflow`).
+- Publishing that environment to the **Prime Intellect Environments Hub** (`o-taisei/conductor-workflow`).
 - **prime-rl** GRPO training (trainer / inference / orchestrator) on a **multi-node Slurm** H100 cluster.
 - Phase 1 clusters (text-only, static verification): `code`, `science_mcq`, `hard_math`. Pilot = 201 items.
 
@@ -65,18 +65,21 @@ prime-rl 3 processes: trainer(FSDP2) | inference(vLLM) | orchestrator(asyncio CP
    async reward = parser → DAG executor (OpenRouter workers, parallel) → grader → tiered reward
 ```
 
-- **Env referenced by Hub id**: prime-rl TOML `[[orchestrator.train.env]] id = "DeL-TaiseiOzaki/conductor-workflow"`, `args={...}` → `load_environment` kwargs. Env pre-installed via `prime env install`.
+- **Env referenced by Hub id**: prime-rl TOML `[[orchestrator.train.env]] id = "o-taisei/conductor-workflow"`, `args={...}` → `load_environment` kwargs. Env pre-installed via `prime env install`.
 - **GPU topology (4B)**: single node enough — 6 GPU vLLM inference + 2 GPU FSDP trainer (matches official Qwen3-4B example). **Multi-node = rollout throughput** (more inference nodes hide external-API reward latency — our reward is API-latency-bound).
 - **Weight sync**: filesystem (NFS, default & safe) or NCCL broadcast. `/home` is NFS-shared across nodes ✓.
 - **Off-policy**: `orchestrator.max_off_policy_steps` (default 8); IS correction; validated to async level 4 (INTELLECT-2).
 
 ### Component layout
 
-| Component | Location | Phase |
-|-----------|----------|-------|
-| parser / reward / graders (pure, tested) | `environments/conductor_workflow/src/.../{parser,reward,graders}` | **1 (now)** |
-| workers / executor / `load_environment` wiring | same package | 2 |
-| prime-rl configs + sbatch | `configs/`, `scripts/` | 3 |
+Package uses a **flat layout** (`environments/conductor_workflow/conductor_workflow/`), NOT `src/` — `prime env push` detects the env only via a top-level `*.py` or an immediate subdir with `__init__.py`.
+
+| Component | Location | Status |
+|-----------|----------|--------|
+| parser / reward / graders (pure, tested) | `environments/conductor_workflow/conductor_workflow/{parser,reward,graders}` | ✅ done (graders live-fixed) |
+| workers / executor / `load_environment` wiring | same package | ✅ done |
+| Env published to Hub | `o-taisei/conductor-workflow` v0.2.2 (PUBLIC) | ✅ pushed |
+| prime-rl configs + sbatch | `configs/`, `scripts/` | ⏭ Phase 3 |
 
 ## 技術選定 (Tech Stack & Rationale)
 
@@ -106,6 +109,9 @@ prime-rl 3 processes: trainer(FSDP2) | inference(vLLM) | orchestrator(asyncio CP
 | Single-node compute for 4B; multi-node for throughput | 4B fits 1 node; reward is API-bound so scale inference nodes | multi-node trainer sharding | 2026-06-29 |
 | filesystem weight sync (NFS) default | `/home` NFS shared; safe; NCCL optional later | NCCL broadcast | 2026-06-29 |
 | internal graders named `graders/` not `verifiers/` | avoid clash with the `verifiers` library | — | 2026-06-29 |
+| flat package layout (no `src/`) | `prime env push` only detects top-level `*.py` or immediate `__init__.py` subdir | src-layout | 2026-06-29 |
+| ruff config in `ruff.toml`, not pyproject | `prime env push --auto-bump` rewrites every `version`-like key (incl. `[tool.ruff] target-version`) | keep in pyproject | 2026-06-29 |
+| publish env PUBLIC as `o-taisei/conductor-workflow` | user decision; Hub owner slug = `o-taisei` | PRIVATE | 2026-06-29 |
 
 ## TODO / Open Questions
 
