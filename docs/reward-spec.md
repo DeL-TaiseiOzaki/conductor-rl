@@ -1,44 +1,72 @@
 # Reward spec (Conductor GRPO)
 
-Outcome-style reward computed per rollout (one Conductor-generated workflow, executed by the workers). **Tiered / shaped** so correctness dominates, process milestones give dense signal for cold-start, and efficiency is a bonus **only when correct**.
+Outcome-style reward computed per rollout (one Conductor-generated workflow, executed by the workers). **Tiered / shaped** so correctness dominates, process milestones give dense signal for cold-start, and efficiency is a **group-relative** bonus **only when correct**.
 
 ## Formula
 
 ```
-R = w_corr·s_correct + w_fmt·f_fmt + w_exec·f_exec + w_eff·b_eff·1[correct]
+R_i = w_corr * s_correct_i
+    + w_fmt  * f_fmt_i
+    + w_exec * f_exec_i
+    + (w_lat * b_lat_i + w_cost * b_cost_i) * 1[correct_i]
 ```
 
-Locked weights (v1): `w_corr=1.0`, `w_fmt=0.1`, `w_exec=0.1`, `w_eff=0.2`.
+Locked weights (v2): `w_corr=1.0`, `w_fmt=0.1`, `w_exec=0.1`.
+Staging weights: `w_lat=0.0`, `w_cost=0.0` (efficiency OFF at start; each ramps to ~0.1).
 
-**Invariant:** `max(wrong) = w_fmt + w_exec = 0.2  <  min(correct) ≈ 1.2`. Correctness always dominates.
+**Invariant:** `max(wrong) = w_fmt + w_exec = 0.2 < min(correct)`. Max efficiency bonus = w_lat + w_cost <= 0.2 < min(correct). Correctness always dominates.
 
-## Terms
+## Per-rollout terms
 
-- **`s_correct`** ∈ {0,1} (or [0,1]) — from the per-cluster verifier (`docs/data-spec.md`):
-  - `code` — all tests pass (binary) **or fraction of tests passed (continuous — recommended**; eases hard-cluster signal collapse).
-  - `science_mcq` — exact letter match (binary).
-  - `hard_math` — SymPy equivalence vs gold, `+ TinyV` LLM fallback for equivalent-form false negatives (binary).
-- **`f_fmt`** ∈ [0,1] — workflow validity, graded partial credit (not just 0/1): parseable JSON; 3 arrays equal length; `model_id ∈ {0..3}`; `access_list[i] ⊆ {0..i-1}` (→ acyclic).
-- **`f_exec`** ∈ [0,1] — fraction of worker calls that were **well-specified & executable** (Conductor-controllable). Transient API failures are **retried by the executor, NOT penalized here** (else infra noise leaks into the reward).
-- **`b_eff`** ∈ [0,1] — efficiency, **baseline-relative**, gated by `1[correct]`:
-  - latency proxy = **critical path** of per-model latency weights (parallel steps → `max`).
-  - cost proxy = **sum** of per-call dollar weights (parallel steps → `sum`; every call is billed).
-  - normalize against the *single-strongest-worker-alone* baseline; `b_eff=1` ⇒ much faster/cheaper than baseline.
-  - asymmetry (latency `max`, cost `sum`) makes the Conductor see parallelization as "faster but pricier" correctly.
+- **`s_correct`** in {0,1} (or [0,1]) -- from the per-cluster verifier (`docs/data-spec.md`):
+  - `code` -- all tests pass (binary) **or fraction of tests passed (continuous)**.
+  - `science_mcq` -- exact letter match (binary).
+  - `hard_math` -- SymPy equivalence vs gold, + TinyV LLM fallback (binary).
+- **`f_fmt`** in [0,1] -- workflow validity, graded partial credit: parseable JSON; 3 arrays equal length; `model_id in {0..3}`; `access_list[i] subset {0..i-1}` (acyclic).
+- **`f_exec`** in [0,1] -- fraction of worker calls that were well-specified & executable (Conductor-controllable). Transient API failures are retried by the executor, NOT penalized here.
+
+## Group-relative efficiency bonus (new in v2)
+
+The efficiency bonus is **GROUP-RELATIVE** (no absolute C_ref baseline). Within each GRPO group (the G rollouts for one prompt), among the CORRECT rollouts only:
+
+### Cost ranking
+
+- `C_i` = REAL dollar cost of rollout i = sum over its worker calls of `(prompt_tokens * cost_in_per_1m + completion_tokens * cost_out_per_1m) / 1e6`. Judge (Nemotron) calls cost 0.
+- Among correct rollouts, rank by cost (ascending, cheapest = rank 0):
+  - `b_cost_i = (n_correct - 1 - rank_i) / (n_correct - 1)` so cheapest = 1.0, most expensive = 0.0.
+  - If `n_correct == 1`: `b_cost = 0.5` (neutral).
+  - Incorrect rollouts: `b_cost = 0`.
+
+### Latency ranking
+
+- `L_i` = deterministic latency = critical-path sum of per-worker `latency_weight` (parallel branches -> max). Already computed in executor.
+- `b_lat_i` analogous to cost ranking on latency (fastest = 1.0).
+
+### Combined
+
+```
+efficiency_i = (w_lat * b_lat_i + w_cost * b_cost_i) * 1[correct_i]
+```
+
+### Worker-call cache
+
+A module-level cache keyed on `(resolved_slug, prompt, max_tokens, temperature)` avoids redundant API spend when the same call is repeated across rollouts. **The cache saves real wallet spend but the modeled cost (token counts) is still carried** so the reward function reflects deployment cost. Deterministic with temperature=0.
 
 ## Staging (avoid fragile multi-objective tuning)
 
-- Keep `λ, μ` (inside `b_eff`) at **0** to start (accuracy-first). Once accuracy is stable, introduce **latency**, then **cost**.
-- Optional **threshold form**: penalize only beyond a latency/cost budget (don't penalize already-cheap correct workflows).
+- Keep `w_lat`, `w_cost` at **0** to start (accuracy-first). Once accuracy is stable, introduce **cost**, then **latency**.
+- Recommended ramp: 0 -> 0.05 -> 0.1 per weight.
+- The old `lambda_latency`/`mu_cost` baseline-relative mechanism is preserved for backward compatibility but the group-relative design is preferred.
 
 ## GRPO notes
 
-- Group-relative advantage `A_i = (R_i − mean)/std`. Constant terms cancel within a group, so `f_fmt`/`f_exec` **auto-neutralize once mastered** (cold-start help without asymptotic distortion).
-- Use **difficulty-matched groups** so each group has solvable items (`std>0`); otherwise hard-cluster groups collapse (all wrong → all 0.2 → no gradient). Recommended `G=8–16`.
+- Group-relative advantage `A_i = (R_i - mean)/std`. Constant terms cancel within a group, so `f_fmt`/`f_exec` **auto-neutralize once mastered** (cold-start help without asymptotic distortion).
+- The efficiency bonus is implemented as a **group-level reward function** in verifiers (plural params like `states` returning `list[float]`) so it has access to the full group for ranking.
+- Use **difficulty-matched groups** so each group has solvable items (`std>0`); otherwise hard-cluster groups collapse (all wrong -> all 0.2 -> no gradient). Recommended `G=8-16`.
 
 ## Anti reward-hacking
 
-- **Do NOT** add a "use ≥2 workers" term — it invites gaming. Single-route (and, later, self-answer) are valid cheapest paths; the correct-only gating makes them safe.
+- **Do NOT** add a "use >=2 workers" term -- it invites gaming. Single-route (and, later, self-answer) are valid cheapest paths; the correct-only gating makes them safe.
 - `code` verifier: use private + generated / HARDTESTS-style tests; drop problems whose only public test equals the in-prompt example.
 
-> Parent design: vault note `LLM-Orchestration-RL/conductor-rl-自前構築メモ.md` (§報酬設計). Verifier semantics: `docs/data-spec.md`.
+> Parent design: vault note `LLM-Orchestration-RL/conductor-rl-memo.md`. Verifier semantics: `docs/data-spec.md`.

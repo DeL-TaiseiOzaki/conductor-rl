@@ -78,6 +78,9 @@ class NodeResult:
     success: bool = False
     executable: bool = True
     transient_failure: bool = False
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    worker_id: int = -1
 
 
 @dataclass
@@ -90,6 +93,7 @@ class ExecutionResult:
         f_exec: Fraction of well-specified, executable calls in [0,1].
         latency_proxy: Critical-path latency (sum along longest path).
         cost_proxy: Total cost (sum of all node cost weights).
+        cost_usd: REAL dollar cost from actual token usage * per-worker prices.
         b_eff: Efficiency bonus in [0,1], baseline-relative.
     """
 
@@ -98,6 +102,7 @@ class ExecutionResult:
     f_exec: float = 0.0
     latency_proxy: float = 0.0
     cost_proxy: float = 0.0
+    cost_usd: float = 0.0
     b_eff: float = 1.0
 
 
@@ -238,6 +243,34 @@ def compute_b_eff(
 
 
 # ---------------------------------------------------------------------------
+# Real cost computation
+# ---------------------------------------------------------------------------
+
+
+def compute_real_cost_usd(
+    node_results: list[NodeResult],
+    worker_configs: dict[int, WorkerConfig],
+) -> float:
+    """Compute REAL dollar cost from actual token usage * per-worker prices.
+
+    For each node: cost = (prompt_tokens * cost_in_per_1m
+                         + completion_tokens * cost_out_per_1m) / 1e6.
+    Judge calls (not tracked as nodes) have cost 0 by design.
+    """
+    total = 0.0
+    for nr in node_results:
+        cfg = worker_configs.get(nr.worker_id)
+        if cfg is None:
+            continue
+        node_cost = (
+            nr.prompt_tokens * cfg.cost_in_per_1m
+            + nr.completion_tokens * cfg.cost_out_per_1m
+        ) / 1_000_000.0
+        total += node_cost
+    return total
+
+
+# ---------------------------------------------------------------------------
 # DAG executor
 # ---------------------------------------------------------------------------
 
@@ -327,6 +360,7 @@ async def execute_dag(
                     executable=True,
                     success=False,
                     transient_failure=True,
+                    worker_id=node.model_id,
                 )
                 node_results.append(nr)
             elif isinstance(result, WorkerResult):
@@ -337,6 +371,9 @@ async def execute_dag(
                         output=result.output,
                         executable=True,
                         success=True,
+                        prompt_tokens=result.prompt_tokens,
+                        completion_tokens=result.completion_tokens,
+                        worker_id=node.model_id,
                     )
                 elif result.transient_failure:
                     # Transient: executable but failed
@@ -345,6 +382,9 @@ async def execute_dag(
                         executable=True,
                         success=False,
                         transient_failure=True,
+                        prompt_tokens=result.prompt_tokens,
+                        completion_tokens=result.completion_tokens,
+                        worker_id=node.model_id,
                     )
                 else:
                     # Non-transient failure (bad request etc.)
@@ -352,6 +392,7 @@ async def execute_dag(
                         index=node.index,
                         executable=False,
                         success=False,
+                        worker_id=node.model_id,
                     )
                 node_results.append(nr)
 
@@ -359,6 +400,7 @@ async def execute_dag(
     f_exec = compute_f_exec(node_results)
     latency_proxy = compute_critical_path_latency(nodes, worker_configs)
     cost_proxy = compute_total_cost(nodes, worker_configs)
+    cost_usd = compute_real_cost_usd(node_results, worker_configs)
     baseline_lat, baseline_cost = compute_baseline_proxies(worker_configs)
     b_eff = compute_b_eff(
         latency_proxy,
@@ -379,6 +421,7 @@ async def execute_dag(
         f_exec=f_exec,
         latency_proxy=latency_proxy,
         cost_proxy=cost_proxy,
+        cost_usd=cost_usd,
         b_eff=b_eff,
     )
 

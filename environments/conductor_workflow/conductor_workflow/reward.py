@@ -117,6 +117,76 @@ def compute_reward(
 
 
 # ---------------------------------------------------------------------------
+# Group-relative efficiency ranking
+# ---------------------------------------------------------------------------
+
+NEUTRAL_BONUS: float = 0.5
+
+
+def rank_efficiency(
+    correct_flags: list[bool],
+    costs: list[float],
+    latencies: list[float],
+    w_lat: float = 0.0,
+    w_cost: float = 0.0,
+) -> list[float]:
+    """Compute group-relative efficiency bonuses.
+
+    Within a GRPO group, among CORRECT rollouts only, rank by cost
+    (cheapest best) and by latency (fastest best):
+
+        b_cost_i = (n_correct - rank_i) / (n_correct - 1)
+            rank 0 = cheapest => b_cost = 1.0
+            If n_correct == 1 => b_cost = 0.5 (neutral)
+        b_lat_i analogous on latency.
+
+    Incorrect rollouts get 0.0.
+
+    Returns:
+        Per-rollout efficiency bonus = w_lat * b_lat + w_cost * b_cost.
+    """
+    n = len(correct_flags)
+    if n == 0:
+        return []
+
+    # Short-circuit: no efficiency signal when weights are zero
+    if w_lat == 0.0 and w_cost == 0.0:
+        return [0.0] * n
+
+    # Collect indices of correct rollouts
+    correct_indices = [i for i in range(n) if correct_flags[i]]
+    n_correct = len(correct_indices)
+
+    result = [0.0] * n
+
+    if n_correct == 0:
+        return result
+
+    if n_correct == 1:
+        # Single correct rollout: neutral bonus
+        idx = correct_indices[0]
+        result[idx] = w_lat * NEUTRAL_BONUS + w_cost * NEUTRAL_BONUS
+        return result
+
+    # Rank correct rollouts by cost (ascending = cheapest first)
+    cost_sorted = sorted(correct_indices, key=lambda i: costs[i])
+    # Rank correct rollouts by latency (ascending = fastest first)
+    lat_sorted = sorted(correct_indices, key=lambda i: latencies[i])
+
+    cost_rank = {idx: rank for rank, idx in enumerate(cost_sorted)}
+    lat_rank = {idx: rank for rank, idx in enumerate(lat_sorted)}
+
+    denom = n_correct - 1  # guaranteed > 0
+
+    for idx in correct_indices:
+        b_cost = (n_correct - 1 - cost_rank[idx]) / denom
+        b_lat = (n_correct - 1 - lat_rank[idx]) / denom
+        result[idx] = w_lat * b_lat + w_cost * b_cost
+
+    return result
+
+
+# ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
 

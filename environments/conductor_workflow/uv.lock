@@ -497,7 +497,7 @@ wheels = [
 
 [[package]]
 name = "conductor-workflow"
-version = "0.2.2"
+version = "0.2.3"
 source = { editable = "." }
 dependencies = [
     { name = "datasets" },

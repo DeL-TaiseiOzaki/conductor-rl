@@ -13,13 +13,15 @@ workers:                              # list index == model_id used in the workf
     slug: "deepseek/deepseek-v4-flash"
     role: "fast/cheap; drafting, summarizing, aggregation"
     latency_weight: 1.0
-    cost_out_per_1m: 0.18             # USD output price (cost proxy)
+    cost_in_per_1m: 0.09              # USD input price
+    cost_out_per_1m: 0.18             # USD output price
     multimodal: false
     openrouter_variant: ":nitro"      # prefer fastest provider
   - id: 1
     slug: "minimax/minimax-m3"
     role: "multimodal (images/charts), tool use, web search"
     latency_weight: 1.5
+    cost_in_per_1m: 0.30
     cost_out_per_1m: 1.20
     multimodal: true
     openrouter_variant: ":online"     # search-capable
@@ -27,6 +29,7 @@ workers:                              # list index == model_id used in the workf
     slug: "deepseek/deepseek-v4-pro"
     role: "strong, careful reasoning & coding"
     latency_weight: 3.0
+    cost_in_per_1m: 0.435
     cost_out_per_1m: 0.87
     multimodal: false
     openrouter_variant: ""            # balanced (default)
@@ -34,7 +37,8 @@ workers:                              # list index == model_id used in the workf
     slug: "z-ai/glm-5.2"
     role: "strong reasoning/coding; diverse second solver (different lab)"
     latency_weight: 3.0
-    cost_out_per_1m: 4.40
+    cost_in_per_1m: 0.94
+    cost_out_per_1m: 3.00
     multimodal: false
     openrouter_variant: ""
 
@@ -45,6 +49,8 @@ reward:
   w_eff: 0.2
   lambda_latency: 0.0                 # staged in AFTER accuracy is stable
   mu_cost: 0.0                        # staged in after latency
+  w_lat: 0.0                          # group-relative latency weight (staged, ramps to ~0.1)
+  w_cost: 0.0                         # group-relative cost weight (staged, ramps to ~0.1)
   code_s_correct: "fraction"          # "binary" | "fraction" (test-pass rate)
   baseline: "strongest_worker_alone"  # b_eff normalized relative to this
 

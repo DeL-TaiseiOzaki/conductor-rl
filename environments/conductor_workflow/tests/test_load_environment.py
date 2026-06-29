@@ -40,15 +40,19 @@ class TestConfigLoading:
         assert config.judge.slug == "nvidia/nemotron-3-ultra-550b-a55b:free"
         assert config.lambda_latency == 0.0
         assert config.mu_cost == 0.0
+        assert config.w_lat == 0.0
+        assert config.w_cost == 0.0
 
     def test_worker_configs_match_yaml(self) -> None:
         config = load_config()
         w0 = config.worker_configs[0]
         assert w0.openrouter_variant == ":nitro"
         assert w0.latency_weight == 1.0
+        assert w0.cost_in_per_1m == pytest.approx(0.09)
         w3 = config.worker_configs[3]
         assert w3.slug == "z-ai/glm-5.2"
-        assert w3.cost_out_per_1m == 4.40
+        assert w3.cost_out_per_1m == pytest.approx(3.00)
+        assert w3.cost_in_per_1m == pytest.approx(0.94)
 
 
 # ---------------------------------------------------------------------------

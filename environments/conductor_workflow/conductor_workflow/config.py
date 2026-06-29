@@ -64,6 +64,9 @@ class ConductorConfig:
     clusters: list[str]
     code_s_correct: str  # "binary" | "fraction"
     baseline: str
+    # Group-relative efficiency weights (staged, default 0.0 = off)
+    w_lat: float = 0.0
+    w_cost: float = 0.0
 
 
 def load_config(config_path: Path | str | None = None) -> ConductorConfig:
@@ -95,6 +98,7 @@ def load_config(config_path: Path | str | None = None) -> ConductorConfig:
             slug=w["slug"],
             latency_weight=float(w["latency_weight"]),
             cost_out_per_1m=float(w["cost_out_per_1m"]),
+            cost_in_per_1m=float(w.get("cost_in_per_1m", 0.0)),
             openrouter_variant=w.get("openrouter_variant", ""),
         )
 
@@ -134,4 +138,6 @@ def load_config(config_path: Path | str | None = None) -> ConductorConfig:
         clusters=data_raw.get("clusters", ["code", "science_mcq", "hard_math"]),
         code_s_correct=reward_raw.get("code_s_correct", "fraction"),
         baseline=reward_raw.get("baseline", "strongest_worker_alone"),
+        w_lat=float(reward_raw.get("w_lat", 0.0)),
+        w_cost=float(reward_raw.get("w_cost", 0.0)),
     )

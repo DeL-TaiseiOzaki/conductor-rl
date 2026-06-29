@@ -30,6 +30,7 @@ from conductor_workflow.graders.math_verify import grade_math_async
 from conductor_workflow.graders.mcq_exact import grade_mcq
 from conductor_workflow.judge import NemotronJudge
 from conductor_workflow.parser import ParseResult, parse_workflow
+from conductor_workflow.reward import DEFAULT_CORRECT_THRESHOLD, rank_efficiency
 
 logger = logging.getLogger(__name__)
 
@@ -305,22 +306,25 @@ async def _grade_correctness(
 # ---------------------------------------------------------------------------
 
 
+CORRECTNESS_KEY = "_s_correct"
+
+
 def _make_reward_functions(
     config: ConductorConfig,
     client: Any = None,
     judge: NemotronJudge | None = None,
-) -> list[tuple[Any, float]]:
-    """Create the four async reward functions with their weights.
+) -> list[tuple[Any, float, bool]]:
+    """Create the reward functions with their weights.
 
-    Returns list of (func, weight) tuples in execution order:
-    format -> correctness -> execution -> efficiency.
+    Returns list of ``(func, weight, is_group)`` tuples in execution order:
+    format -> correctness -> execution -> efficiency (group).
 
     Execution order matters: correctness caches the DAG result
     in state for execution and efficiency to reuse.
     """
     worker_semaphore = asyncio.Semaphore(32)
 
-    # 1. Format reward
+    # 1. Format reward (per-rollout)
     async def format_reward(
         completion: list[dict[str, str]],
         state: dict[str, Any],
@@ -334,7 +338,7 @@ def _make_reward_functions(
         state[PARSE_RESULT_KEY] = pr
         return pr.f_fmt
 
-    # 2. Correctness reward (triggers DAG execution)
+    # 2. Correctness reward (per-rollout, triggers DAG execution)
     async def correctness_reward(
         completion: list[dict[str, str]],
         info: dict[str, Any],
@@ -349,14 +353,17 @@ def _make_reward_functions(
             client=client,
             semaphore=worker_semaphore,
         )
-        return await _grade_correctness(
+        s_correct = await _grade_correctness(
             exec_result.final_output,
             info,
             config,
             judge=judge,
         )
+        # Cache correctness for the group efficiency function
+        state[CORRECTNESS_KEY] = s_correct
+        return s_correct
 
-    # 3. Execution feasibility reward
+    # 3. Execution feasibility reward (per-rollout)
     async def execution_reward(
         completion: list[dict[str, str]],
         info: dict[str, Any],
@@ -373,29 +380,55 @@ def _make_reward_functions(
         )
         return exec_result.f_exec
 
-    # 4. Efficiency bonus (gated by correctness in compute_reward,
-    #    but here we just return the raw b_eff)
+    # 4. Group-relative efficiency bonus
+    #    Uses plural params (states) so verifiers detects it as a GroupRewardFunc.
+    #    Reads each rollout's cached ExecutionResult + correctness from state,
+    #    ranks correct ones, returns w_lat*b_lat + w_cost*b_cost per rollout.
     async def efficiency_reward(
-        completion: list[dict[str, str]],
-        info: dict[str, Any],
-        state: dict[str, Any],
+        states: list[dict[str, Any]],
         **kwargs: Any,
-    ) -> float:
-        _pr, exec_result = await _ensure_dag_executed(
-            state,
-            completion,
-            info,
-            config,
-            client=client,
-            semaphore=worker_semaphore,
-        )
-        return exec_result.b_eff
+    ) -> list[float]:
+        w_lat = config.w_lat
+        w_cost = config.w_cost
+
+        # Determine correctness threshold per item's verifier type
+        # (all items in a GRPO group share the same prompt/verifier)
+        correct_threshold = DEFAULT_CORRECT_THRESHOLD
+        if states:
+            info = states[0].get("info", {})
+            verifier = info.get("verifier", "")
+            correct_threshold = CORRECT_THRESHOLD_BY_VERIFIER.get(
+                verifier, DEFAULT_CORRECT_THRESHOLD
+            )
+
+        correct_flags: list[bool] = []
+        costs: list[float] = []
+        latencies: list[float] = []
+
+        for state in states:
+            s_correct = state.get(CORRECTNESS_KEY, 0.0)
+            is_correct = s_correct >= correct_threshold
+            correct_flags.append(is_correct)
+
+            exec_result: ExecutionResult | None = state.get(DAG_RESULT_KEY)
+            if exec_result is not None:
+                costs.append(exec_result.cost_usd)
+                latencies.append(exec_result.latency_proxy)
+            else:
+                costs.append(0.0)
+                latencies.append(0.0)
+
+        return rank_efficiency(correct_flags, costs, latencies, w_lat, w_cost)
 
     return [
-        (format_reward, config.reward_weights.w_fmt),
-        (correctness_reward, config.reward_weights.w_corr),
-        (execution_reward, config.reward_weights.w_exec),
-        (efficiency_reward, config.reward_weights.w_eff),
+        (format_reward, config.reward_weights.w_fmt, False),
+        (correctness_reward, config.reward_weights.w_corr, False),
+        (execution_reward, config.reward_weights.w_exec, False),
+        (
+            efficiency_reward,
+            1.0,
+            True,
+        ),  # weight=1.0; w_lat/w_cost are inside rank_efficiency
     ]
 
 
@@ -465,7 +498,9 @@ def build_environment(**kwargs: Any) -> vf.SingleTurnEnv:
         client=worker_client,
         judge=judge,
     )
-    for func, weight in reward_funcs:
+    for func, weight, _is_group in reward_funcs:
+        # Group-level funcs are auto-detected by verifiers via plural
+        # parameter names (e.g. ``states``); no special registration needed.
         rubric.add_reward_func(func, weight=weight)
 
     # Build environment

@@ -3,7 +3,7 @@
 All worker calls are mocked -- no real HTTP traffic.
 Tests cover: single-route, sequential chain, parallel-aggregate DAGs,
 correct context assembly, f_exec accounting, latency = critical path,
-cost = sum, and b_eff normalization.
+cost = sum, real cost_usd from token usage, and b_eff normalization.
 """
 
 from __future__ import annotations
@@ -21,6 +21,7 @@ from conductor_workflow.executor import (
     compute_baseline_proxies,
     compute_critical_path_latency,
     compute_f_exec,
+    compute_real_cost_usd,
     compute_total_cost,
     execute_dag,
 )
@@ -32,10 +33,34 @@ from conductor_workflow.workers import WorkerConfig, WorkerResult
 # ---------------------------------------------------------------------------
 
 WORKER_CONFIGS: dict[int, WorkerConfig] = {
-    0: WorkerConfig(worker_id=0, slug="fast", latency_weight=1.0, cost_out_per_1m=0.18),
-    1: WorkerConfig(worker_id=1, slug="mm", latency_weight=1.5, cost_out_per_1m=1.20),
-    2: WorkerConfig(worker_id=2, slug="pro", latency_weight=3.0, cost_out_per_1m=0.87),
-    3: WorkerConfig(worker_id=3, slug="glm", latency_weight=3.0, cost_out_per_1m=4.40),
+    0: WorkerConfig(
+        worker_id=0,
+        slug="fast",
+        latency_weight=1.0,
+        cost_out_per_1m=0.18,
+        cost_in_per_1m=0.09,
+    ),
+    1: WorkerConfig(
+        worker_id=1,
+        slug="mm",
+        latency_weight=1.5,
+        cost_out_per_1m=1.20,
+        cost_in_per_1m=0.30,
+    ),
+    2: WorkerConfig(
+        worker_id=2,
+        slug="pro",
+        latency_weight=3.0,
+        cost_out_per_1m=0.87,
+        cost_in_per_1m=0.435,
+    ),
+    3: WorkerConfig(
+        worker_id=3,
+        slug="glm",
+        latency_weight=3.0,
+        cost_out_per_1m=3.00,
+        cost_in_per_1m=0.94,
+    ),
 }
 
 
@@ -91,7 +116,7 @@ class TestTotalCost:
 
     def test_single_node_cost(self) -> None:
         nodes = [SubtaskNode(index=0, instruction="x", model_id=3, deps=[])]
-        assert compute_total_cost(nodes, WORKER_CONFIGS) == pytest.approx(4.40)
+        assert compute_total_cost(nodes, WORKER_CONFIGS) == pytest.approx(3.00)
 
     def test_parallel_nodes_sum(self) -> None:
         # Parallel nodes: cost is sum, not max
@@ -106,7 +131,64 @@ class TestTotalCost:
             SubtaskNode(index=0, instruction="a", model_id=0, deps=[]),
             SubtaskNode(index=1, instruction="b", model_id=3, deps=[0]),
         ]
-        assert compute_total_cost(nodes, WORKER_CONFIGS) == pytest.approx(0.18 + 4.40)
+        assert compute_total_cost(nodes, WORKER_CONFIGS) == pytest.approx(0.18 + 3.00)
+
+
+# ---------------------------------------------------------------------------
+# Real cost_usd computation
+# ---------------------------------------------------------------------------
+
+
+class TestComputeRealCostUsd:
+    """cost_usd = sum of (prompt_tok * in_price + comp_tok * out_price) / 1e6."""
+
+    def test_two_node_workflow_cost(self) -> None:
+        # Arrange: node 0 = worker 0 (in=0.09, out=0.18), node 1 = worker 2 (in=0.435, out=0.87)
+        node_results = [
+            NodeResult(
+                index=0,
+                success=True,
+                executable=True,
+                prompt_tokens=1000,
+                completion_tokens=500,
+                worker_id=0,
+            ),
+            NodeResult(
+                index=1,
+                success=True,
+                executable=True,
+                prompt_tokens=2000,
+                completion_tokens=1000,
+                worker_id=2,
+            ),
+        ]
+
+        # Act
+        cost = compute_real_cost_usd(node_results, WORKER_CONFIGS)
+
+        # Assert
+        # node 0: (1000 * 0.09 + 500 * 0.18) / 1e6 = (90 + 90) / 1e6 = 0.000180
+        # node 1: (2000 * 0.435 + 1000 * 0.87) / 1e6 = (870 + 870) / 1e6 = 0.001740
+        expected = 0.000180 + 0.001740
+        assert cost == pytest.approx(expected)
+
+    def test_judge_node_has_zero_cost(self) -> None:
+        """Nodes with worker_id=-1 (unknown) have no config -> cost 0."""
+        node_results = [
+            NodeResult(
+                index=0,
+                success=True,
+                executable=True,
+                prompt_tokens=500,
+                completion_tokens=100,
+                worker_id=-1,
+            ),
+        ]
+        cost = compute_real_cost_usd(node_results, WORKER_CONFIGS)
+        assert cost == 0.0
+
+    def test_empty_node_results(self) -> None:
+        assert compute_real_cost_usd([], WORKER_CONFIGS) == 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -153,27 +235,27 @@ class TestComputeBEff:
 
     def test_lambda_mu_zero_gives_one(self) -> None:
         # With lambda=mu=0, b_eff=1 for any DAG
-        b = compute_b_eff(10.0, 100.0, 3.0, 4.40, lambda_latency=0.0, mu_cost=0.0)
+        b = compute_b_eff(10.0, 100.0, 3.0, 3.00, lambda_latency=0.0, mu_cost=0.0)
         assert b == pytest.approx(1.0)
 
     def test_baseline_exact_gives_one(self) -> None:
-        b = compute_b_eff(3.0, 4.40, 3.0, 4.40, lambda_latency=1.0, mu_cost=1.0)
+        b = compute_b_eff(3.0, 3.00, 3.0, 3.00, lambda_latency=1.0, mu_cost=1.0)
         assert b == pytest.approx(1.0)
 
     def test_faster_than_baseline_gives_one(self) -> None:
         # Faster/cheaper: p_lat and p_cost clamped at 0
-        b = compute_b_eff(1.0, 0.18, 3.0, 4.40, lambda_latency=1.0, mu_cost=1.0)
+        b = compute_b_eff(1.0, 0.18, 3.0, 3.00, lambda_latency=1.0, mu_cost=1.0)
         assert b == pytest.approx(1.0)
 
     def test_slower_than_baseline_less_than_one(self) -> None:
-        b = compute_b_eff(6.0, 4.40, 3.0, 4.40, lambda_latency=1.0, mu_cost=0.0)
+        b = compute_b_eff(6.0, 3.00, 3.0, 3.00, lambda_latency=1.0, mu_cost=0.0)
         expected = math.exp(-(1.0 * max(0, 6.0 / 3.0 - 1)))
         assert b == pytest.approx(expected)
         assert b < 1.0
 
     def test_more_expensive_than_baseline(self) -> None:
-        b = compute_b_eff(3.0, 8.80, 3.0, 4.40, lambda_latency=0.0, mu_cost=1.0)
-        expected = math.exp(-(1.0 * max(0, 8.80 / 4.40 - 1)))
+        b = compute_b_eff(3.0, 6.00, 3.0, 3.00, lambda_latency=0.0, mu_cost=1.0)
+        expected = math.exp(-(1.0 * max(0, 6.00 / 3.00 - 1)))
         assert b == pytest.approx(expected)
         assert b < 1.0
 
@@ -190,7 +272,7 @@ class TestBaselineProxies:
         lat, cost = compute_baseline_proxies(WORKER_CONFIGS)
         # Workers 2 and 3 both have latency=3.0; GLM (3) has higher cost
         assert lat == 3.0
-        assert cost == 4.40
+        assert cost == 3.00
 
 
 # ---------------------------------------------------------------------------
@@ -260,13 +342,23 @@ class TestBuildExecutionLevels:
 # ---------------------------------------------------------------------------
 
 
-def _mock_call_worker_factory(responses: dict[int, str]):
-    """Create a mock call_worker that returns predetermined responses."""
+def _mock_call_worker_factory(
+    responses: dict[int, str],
+    token_counts: dict[int, tuple[int, int]] | None = None,
+):
+    """Create a mock call_worker that returns predetermined responses with token usage."""
+    default_tokens: dict[int, tuple[int, int]] = token_counts or {}
 
     async def mock_call_worker(config, prompt, *, client=None, semaphore=None):
         worker_id = config.worker_id
         if worker_id in responses:
-            return WorkerResult(output=responses[worker_id], success=True)
+            p_tok, c_tok = default_tokens.get(worker_id, (100, 50))
+            return WorkerResult(
+                output=responses[worker_id],
+                success=True,
+                prompt_tokens=p_tok,
+                completion_tokens=c_tok,
+            )
         return WorkerResult(output="", success=False, error_message="no mock")
 
     return mock_call_worker
@@ -334,8 +426,33 @@ class TestExecuteDag:
         assert result.f_exec == 1.0
         # Latency: max(3.0, 3.0) + 1.0 = 4.0
         assert result.latency_proxy == 4.0
-        # Cost: 0.87 + 4.40 + 0.18 = 5.45
-        assert result.cost_proxy == pytest.approx(0.87 + 4.40 + 0.18)
+        # Cost: 0.87 + 3.00 + 0.18 = 4.05
+        assert result.cost_proxy == pytest.approx(0.87 + 3.00 + 0.18)
+
+    @pytest.mark.asyncio
+    async def test_cost_usd_computed_from_token_usage(self) -> None:
+        """cost_usd uses real token counts * per-worker prices."""
+        # Arrange: 2-call workflow: worker 0 (1000 in, 500 out), worker 2 (2000 in, 1000 out)
+        nodes = [
+            SubtaskNode(index=0, instruction="Draft", model_id=0, deps=[]),
+            SubtaskNode(index=1, instruction="Solve", model_id=2, deps=[0]),
+        ]
+        pr = _make_parse_result(nodes)
+        token_counts = {0: (1000, 500), 2: (2000, 1000)}
+
+        with patch(
+            "conductor_workflow.executor.call_worker",
+            new=_mock_call_worker_factory(
+                {0: "draft", 2: "solution"},
+                token_counts=token_counts,
+            ),
+        ):
+            result = await execute_dag(pr, "Task", WORKER_CONFIGS)
+
+        # node 0: (1000 * 0.09 + 500 * 0.18) / 1e6 = 0.000180
+        # node 1: (2000 * 0.435 + 1000 * 0.87) / 1e6 = 0.001740
+        expected_cost = 0.000180 + 0.001740
+        assert result.cost_usd == pytest.approx(expected_cost)
 
     @pytest.mark.asyncio
     async def test_invalid_parse_result(self) -> None:
@@ -355,7 +472,9 @@ class TestExecuteDag:
 
         async def mock_call(config, prompt, *, client=None, semaphore=None):
             if config.worker_id == 0:
-                return WorkerResult(output="ok", success=True)
+                return WorkerResult(
+                    output="ok", success=True, prompt_tokens=10, completion_tokens=5
+                )
             return WorkerResult(
                 output="",
                 success=False,

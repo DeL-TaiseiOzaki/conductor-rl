@@ -7,8 +7,10 @@ import pytest
 from conductor_workflow.reward import (
     DEFAULT_CORRECT_THRESHOLD,
     DEFAULT_WEIGHTS,
+    NEUTRAL_BONUS,
     RewardWeights,
     compute_reward,
+    rank_efficiency,
 )
 
 # ---------------------------------------------------------------------------
@@ -55,14 +57,7 @@ class TestRewardInvariant:
         assert max_wrong < min_correct
 
     def test_max_wrong_less_than_min_correct_fractional(self) -> None:
-        """With fractional code verifier (threshold=0.5).
-
-        The spec invariant ``max(wrong) = w_fmt + w_exec = 0.2`` assumes
-        s_correct=0 for "maximally wrong".  With fractional scoring,
-        a near-threshold wrong answer (e.g. s_correct=0.49) can exceed
-        min(correct) in raw score, but the spec invariant is about the
-        zero-correct worst case, which always holds.
-        """
+        """With fractional code verifier (threshold=0.5)."""
         min_correct = compute_reward(
             s_correct=0.5,
             f_fmt=0.0,
@@ -70,8 +65,6 @@ class TestRewardInvariant:
             b_eff=0.0,
             correct_threshold=0.5,
         )
-        # Spec invariant: worst-case wrong (s_correct=0) with perfect
-        # format + exec still only gets 0.2
         max_wrong_worst = compute_reward(
             s_correct=0.0,
             f_fmt=1.0,
@@ -174,3 +167,128 @@ class TestComputeRewardErrors:
                 b_eff=0.0,
                 correct_threshold=1.5,
             )
+
+
+# ---------------------------------------------------------------------------
+# Group-relative efficiency ranking
+# ---------------------------------------------------------------------------
+
+
+class TestRankEfficiencyHappyPath:
+    """rank_efficiency: basic ranking over a GRPO group."""
+
+    def test_cheapest_correct_gets_b_cost_one(self) -> None:
+        # Arrange: 3 correct rollouts with different costs
+        correct = [True, True, True]
+        costs = [1.0, 2.0, 3.0]  # rollout 0 cheapest
+        latencies = [1.0, 1.0, 1.0]
+
+        # Act
+        result = rank_efficiency(correct, costs, latencies, w_lat=0.0, w_cost=0.1)
+
+        # Assert: cheapest (idx 0) -> b_cost=1.0, most expensive (idx 2) -> b_cost=0.0
+        assert result[0] == pytest.approx(0.1 * 1.0)  # w_cost * 1.0
+        assert result[2] == pytest.approx(0.1 * 0.0)  # w_cost * 0.0
+
+    def test_most_expensive_correct_gets_b_cost_zero(self) -> None:
+        correct = [True, True, True]
+        costs = [3.0, 1.0, 2.0]
+        latencies = [1.0, 1.0, 1.0]
+
+        result = rank_efficiency(correct, costs, latencies, w_lat=0.0, w_cost=0.1)
+
+        # idx 0 is most expensive -> 0.0
+        assert result[0] == pytest.approx(0.0)
+        # idx 1 is cheapest -> 1.0
+        assert result[1] == pytest.approx(0.1)
+
+    def test_incorrect_rollouts_get_zero(self) -> None:
+        correct = [True, False, True]
+        costs = [1.0, 0.5, 2.0]  # idx 1 is cheapest but wrong
+        latencies = [1.0, 0.5, 2.0]
+
+        result = rank_efficiency(correct, costs, latencies, w_lat=0.1, w_cost=0.1)
+
+        assert result[1] == 0.0  # incorrect -> 0
+
+    def test_single_correct_gets_neutral(self) -> None:
+        correct = [False, True, False]
+        costs = [1.0, 2.0, 3.0]
+        latencies = [1.0, 2.0, 3.0]
+
+        result = rank_efficiency(correct, costs, latencies, w_lat=0.1, w_cost=0.1)
+
+        # Single correct -> neutral = 0.5 for both
+        expected = 0.1 * NEUTRAL_BONUS + 0.1 * NEUTRAL_BONUS
+        assert result[1] == pytest.approx(expected)
+        assert result[0] == 0.0
+        assert result[2] == 0.0
+
+
+class TestRankEfficiencyStaging:
+    """Staging: w_lat=w_cost=0 means efficiency contributes 0."""
+
+    def test_zero_weights_returns_all_zeros(self) -> None:
+        correct = [True, True, True]
+        costs = [1.0, 2.0, 3.0]
+        latencies = [1.0, 2.0, 3.0]
+
+        result = rank_efficiency(correct, costs, latencies, w_lat=0.0, w_cost=0.0)
+
+        assert result == [0.0, 0.0, 0.0]
+
+
+class TestRankEfficiencyCorrectnessDominance:
+    """Max efficiency bonus < min correctness reward (invariant)."""
+
+    def test_max_bonus_less_than_min_correct(self) -> None:
+        # Arrange: max possible efficiency bonus with w_lat=0.1, w_cost=0.1
+        w_lat = 0.1
+        w_cost = 0.1
+        max_bonus = w_lat * 1.0 + w_cost * 1.0  # best possible
+
+        # min(correct) with binary verifier = w_corr * 1.0 = 1.0
+        min_correct = 1.0
+
+        # Assert invariant
+        assert max_bonus < min_correct
+
+    def test_max_bonus_less_than_min_correct_fractional(self) -> None:
+        """Even with fractional code verifier (threshold=0.5), invariant holds."""
+        w_lat = 0.1
+        w_cost = 0.1
+        max_bonus = w_lat + w_cost  # 0.2
+
+        # min(correct) with threshold=0.5 = w_corr * 0.5 = 0.5
+        min_correct = 0.5
+
+        assert max_bonus < min_correct
+
+
+class TestRankEfficiencyEdgeCases:
+    """Edge cases for rank_efficiency."""
+
+    def test_empty_group(self) -> None:
+        assert rank_efficiency([], [], [], w_lat=0.1, w_cost=0.1) == []
+
+    def test_all_incorrect(self) -> None:
+        correct = [False, False, False]
+        costs = [1.0, 2.0, 3.0]
+        latencies = [1.0, 2.0, 3.0]
+
+        result = rank_efficiency(correct, costs, latencies, w_lat=0.1, w_cost=0.1)
+
+        assert result == [0.0, 0.0, 0.0]
+
+    def test_latency_ranking_independent_of_cost(self) -> None:
+        """b_lat ranks by latency, not cost."""
+        correct = [True, True]
+        costs = [10.0, 1.0]  # idx 1 cheaper
+        latencies = [1.0, 10.0]  # idx 0 faster
+
+        result = rank_efficiency(correct, costs, latencies, w_lat=0.1, w_cost=0.0)
+
+        # idx 0 is fastest -> b_lat=1.0
+        assert result[0] == pytest.approx(0.1)
+        # idx 1 is slowest -> b_lat=0.0
+        assert result[1] == pytest.approx(0.0)

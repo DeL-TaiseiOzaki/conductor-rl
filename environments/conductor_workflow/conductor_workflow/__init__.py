@@ -18,13 +18,14 @@ Entry point:
 """
 
 from conductor_workflow.parser import ParseResult, parse_workflow
-from conductor_workflow.reward import compute_reward
+from conductor_workflow.reward import compute_reward, rank_efficiency
 
 __all__ = [
     "ParseResult",
     "compute_reward",
     "load_environment",
     "parse_workflow",
+    "rank_efficiency",
 ]
 
 

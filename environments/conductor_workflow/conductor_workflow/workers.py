@@ -5,6 +5,13 @@ through OpenRouter.  All calls are async, concurrency-limited via
 semaphores, and retry transient failures (429, 5xx, timeouts) with
 bounded exponential backoff.
 
+Worker-call cache (keyed on resolved slug + prompt + max_tokens +
+temperature) avoids redundant API spend when the same call is repeated
+across rollouts in a GRPO group.  **The cache saves real wallet spend
+but the modeled cost (token counts) is still carried in the cached
+WorkerResult** so the reward function reflects deployment cost.
+Deterministic with temperature=0.
+
 Security:
     OPENROUTER_API_KEY is read lazily at call time from ``os.environ``.
     It is never hardcoded or logged.
@@ -36,6 +43,27 @@ TRANSIENT_STATUS_CODES: frozenset[int] = frozenset({429, 500, 502, 503, 504})
 
 logger = logging.getLogger(__name__)
 
+# ---------------------------------------------------------------------------
+# Worker-call cache
+# ---------------------------------------------------------------------------
+
+# Module-level cache: (resolved_slug, prompt, max_tokens, temperature) -> WorkerResult
+_worker_cache: dict[tuple[str, str, int, float], WorkerResult] = {}
+
+# Global flag to disable the cache (e.g. for tests that want fresh calls)
+_cache_enabled: bool = True
+
+
+def clear_cache() -> None:
+    """Clear the worker-call cache."""
+    _worker_cache.clear()
+
+
+def set_cache_enabled(enabled: bool) -> None:
+    """Enable or disable the worker-call cache globally."""
+    global _cache_enabled
+    _cache_enabled = enabled
+
 
 # ---------------------------------------------------------------------------
 # Result types
@@ -52,12 +80,16 @@ class WorkerResult:
         transient_failure: True if ALL retries were exhausted due to
             transient errors.  NOT a Conductor-caused failure.
         error_message: Human-readable error (empty on success).
+        prompt_tokens: Input tokens consumed (from API usage).
+        completion_tokens: Output tokens consumed (from API usage).
     """
 
     output: str
     success: bool
     transient_failure: bool = False
     error_message: str = ""
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
 
 
 # ---------------------------------------------------------------------------
@@ -124,15 +156,21 @@ async def _retry_with_backoff(
     """Execute *coro_factory()* with bounded exponential backoff on transient errors.
 
     ``coro_factory`` is a zero-arg callable returning a fresh coroutine
-    each time (so we can retry).
+    each time (so we can retry).  The factory must return
+    ``(text, prompt_tokens, completion_tokens)``.
     """
     backoff = initial_backoff
     last_error: Exception | None = None
 
     for attempt in range(max_retries + 1):
         try:
-            text = await coro_factory()
-            return WorkerResult(output=text, success=True)
+            text, p_tok, c_tok = await coro_factory()
+            return WorkerResult(
+                output=text,
+                success=True,
+                prompt_tokens=p_tok,
+                completion_tokens=c_tok,
+            )
         except Exception as exc:
             last_error = exc
             if _is_transient_error(exc) and attempt < max_retries:
@@ -183,6 +221,7 @@ class WorkerConfig:
     slug: str
     latency_weight: float
     cost_out_per_1m: float
+    cost_in_per_1m: float = 0.0
     openrouter_variant: str = ""
 
 
@@ -210,6 +249,12 @@ async def call_worker(
 ) -> WorkerResult:
     """Call a worker model via OpenRouter.
 
+    Uses a module-level cache keyed on ``(resolved_slug, prompt,
+    max_tokens, temperature)``.  On hit the stored ``WorkerResult``
+    (including its token counts) is returned **without** an API call.
+    The cache saves real wallet spend; the modeled cost (token usage
+    carried in the result) still reflects what deployment would cost.
+
     Args:
         config: Worker configuration.
         prompt: The full prompt (task + subtask instruction + deps context).
@@ -219,12 +264,18 @@ async def call_worker(
         temperature: Sampling temperature.
 
     Returns:
-        ``WorkerResult`` with the model's text output.
+        ``WorkerResult`` with the model's text output and token usage.
     """
-    resolved_client = client or build_client()
     model = resolve_model_slug(config)
+    cache_key = (model, prompt, max_tokens, temperature)
 
-    async def _do_call() -> str:
+    if _cache_enabled and cache_key in _worker_cache:
+        logger.debug("Cache hit for %s (prompt len %d)", model, len(prompt))
+        return _worker_cache[cache_key]
+
+    resolved_client = client or build_client()
+
+    async def _do_call() -> tuple[str, int, int]:
         if semaphore is not None:
             async with semaphore:
                 return await _raw_chat_call(
@@ -234,7 +285,12 @@ async def call_worker(
             resolved_client, model, prompt, max_tokens, temperature
         )
 
-    return await _retry_with_backoff(_do_call)
+    result = await _retry_with_backoff(_do_call)
+
+    if _cache_enabled and result.success:
+        _worker_cache[cache_key] = result
+
+    return result
 
 
 async def _raw_chat_call(
@@ -243,8 +299,8 @@ async def _raw_chat_call(
     prompt: str,
     max_tokens: int,
     temperature: float,
-) -> str:
-    """Make a raw chat completion call and return the text."""
+) -> tuple[str, int, int]:
+    """Make a raw chat completion call and return (text, prompt_tokens, completion_tokens)."""
     response = await client.chat.completions.create(
         model=model,
         messages=[{"role": "user", "content": prompt}],
@@ -252,7 +308,11 @@ async def _raw_chat_call(
         temperature=temperature,
     )
     choice = response.choices[0]
-    return choice.message.content or ""
+    text = choice.message.content or ""
+    usage = getattr(response, "usage", None)
+    p_tok = getattr(usage, "prompt_tokens", 0) or 0
+    c_tok = getattr(usage, "completion_tokens", 0) or 0
+    return text, p_tok, c_tok
 
 
 # ---------------------------------------------------------------------------
@@ -276,11 +336,13 @@ async def call_judge(
     """Call the judge model (Nemotron / env override).
 
     The judge slug can be overridden via the JUDGE_MODEL env var.
+    Judge cost is 0 (free tier) so token counts are captured but not
+    priced in the reward.
     """
     slug = judge_slug or os.environ.get("JUDGE_MODEL", DEFAULT_JUDGE_SLUG)
     resolved_client = client or build_client()
 
-    async def _do_call() -> str:
+    async def _do_call() -> tuple[str, int, int]:
         if semaphore is not None:
             async with semaphore:
                 return await asyncio.wait_for(

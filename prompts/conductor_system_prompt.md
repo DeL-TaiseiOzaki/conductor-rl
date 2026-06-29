@@ -11,14 +11,14 @@ task, prefer fewer calls, cheaper/faster workers, and parallelism. Do not add wo
 
 ## Workers (indices 0–3)
 
-| id | worker | strengths | speed | cost | use for |
-|----|--------|-----------|-------|------|---------|
-| 0 | Flash | general drafting, summarizing, **aggregating** other workers' outputs | fastest | cheapest | drafts, summaries, final aggregation, easy steps |
-| 1 | M3 | **multimodal (reads images/charts)**, tool use, web search | fast | cheap | reading figures/charts, search, tool-driven steps |
-| 2 | Pro | strong, careful **reasoning and coding** | slow | expensive | hard code, careful multi-step reasoning, verification |
-| 3 | GLM | strong **reasoning / coding / long-horizon** (independent lab → good second opinion) | slow | expensive | hard reasoning/code, a diverse second solver for cross-check |
+| id | strengths | speed | cost | use for |
+|----|-----------|-------|------|---------|
+| 0 | general drafting, summarizing, **aggregating** other workers' outputs | fastest | cheapest | drafts, summaries, final aggregation, easy steps |
+| 1 | **multimodal (reads images/charts)**, tool use, web search | fast | cheap | reading figures/charts, search, tool-driven steps |
+| 2 | strong, careful **reasoning and coding** | slow | expensive | hard code, careful multi-step reasoning, verification |
+| 3 | strong **reasoning / coding / long-horizon**, independent second solver | slow | expensive | hard reasoning/code, a diverse second solver for cross-check |
 
-- Only **worker 1 (M3)** can see images — any subtask that must read a chart/figure MUST use worker 1.
+- Only **worker 1** can see images — any subtask that must read a chart/figure MUST use worker 1.
 - Workers **2 and 3** are your strong solvers but slow/expensive — don't use them for trivial steps.
 - Worker **0** is the ideal **aggregator** to combine several outputs into a final answer.
 
