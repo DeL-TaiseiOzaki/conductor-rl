@@ -13,7 +13,7 @@ workers:                              # list index == model_id used in the workf
     slug: "deepseek/deepseek-v4-flash"
     role: "fast/cheap; drafting, summarizing, aggregation"
     latency_weight: 1.0
-    cost_in_per_1m: 0.09              # USD input price
+    cost_in_per_1m: 0.09              # USD input price (OpenRouter, fetched 2026-06-29)
     cost_out_per_1m: 0.18             # USD output price
     multimodal: false
     openrouter_variant: ":nitro"      # prefer fastest provider
@@ -38,7 +38,7 @@ workers:                              # list index == model_id used in the workf
     role: "strong reasoning/coding; diverse second solver (different lab)"
     latency_weight: 3.0
     cost_in_per_1m: 0.94
-    cost_out_per_1m: 3.00
+    cost_out_per_1m: 3.00             # was 4.40 (stale); live OpenRouter 2026-06-29
     multimodal: false
     openrouter_variant: ""
 
