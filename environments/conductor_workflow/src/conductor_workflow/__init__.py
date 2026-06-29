@@ -1,4 +1,4 @@
-"""Conductor-workflow: pure, framework-independent core logic.
+"""Conductor-workflow: verifiers SingleTurnEnv for multi-agent orchestration.
 
 Hub name: DeL-TaiseiOzaki/conductor-workflow
 
@@ -6,16 +6,15 @@ Modules:
     parser      -- parse + validate the ```workflow JSON block
     reward      -- tiered shaped reward (s_correct, f_fmt, f_exec, b_eff)
     graders/    -- per-cluster verifiers (code_exec, mcq_exact, math_verify)
+    workers     -- async OpenRouter client (worker + judge calls)
+    executor    -- async DAG executor with efficiency accounting
+    judge       -- concrete TinyV fallback (NemotronJudge)
+    config      -- YAML config loader
 
-Planned wiring (next phase -- ``load_environment``):
-    - Subclass ``verifiers.Parser`` as ``WorkflowParser``
-      (``parse`` extracts the ```workflow JSON block;
-       ``get_format_reward_func`` returns a graded partial-credit scorer).
-    - Build a ``verifiers.Rubric`` with four async reward functions
-      registered in order: format -> execution -> correctness -> efficiency.
-    - Wrap in ``verifiers.SingleTurnEnv`` (one turn = one workflow generation).
-    - ``load_environment`` accepts ``dataset_path``, ``openrouter_base_url``,
-      ``worker_models`` kwargs and validates ``OPENROUTER_API_KEY``.
+Entry point:
+    ``load_environment(**kwargs)`` builds a ``verifiers.SingleTurnEnv``
+    with the pilot dataset wired to a Rubric carrying four async reward
+    functions: format, correctness, execution, efficiency.
 """
 
 from conductor_workflow.parser import ParseResult, parse_workflow
@@ -32,10 +31,21 @@ __all__ = [
 def load_environment(**kwargs: object) -> object:
     """Load the Conductor-RL SingleTurnEnv.
 
-    Not yet wired -- see module docstring for planned implementation.
+    Lazy import to avoid pulling in verifiers/datasets at import time
+    when only using the pure parser/reward modules.
+
+    Accepted kwargs:
+        dataset_path: str -- path to pilot JSONL (default: config).
+        config_path: str -- path to YAML config (default: configs/default.yaml).
+        clusters: list[str] -- filter to specific clusters.
+        worker_client: AsyncOpenAI -- override for testing.
+        judge_client: AsyncOpenAI -- override for testing.
+        skip_key_check: bool -- skip OPENROUTER_API_KEY validation.
+
+    Returns:
+        A ``verifiers.SingleTurnEnv`` instance.
     """
-    raise NotImplementedError(
-        "load_environment is not yet wired. "
-        "Phase 2 will integrate verifiers.SingleTurnEnv + Rubric + "
-        "async worker executor. See module docstring for the plan."
-    )
+    # Deferred import to keep top-level lightweight
+    from conductor_workflow._env_wiring import build_environment
+
+    return build_environment(**kwargs)

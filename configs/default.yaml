@@ -59,3 +59,10 @@ grpo:
 data:
   pilot: "data/pilot/pilot.jsonl"
   clusters: ["code", "science_mcq", "hard_math"]   # text-only Phase 1 (charts MM = pilot-2; SWE/Terminal = Phase 2)
+
+judge:                                  # LLM-as-verifier (TinyV fallback for math equivalent-form false negatives)
+  slug: "nvidia/nemotron-3-ultra-550b-a55b:free"   # free on OpenRouter; env JUDGE_MODEL overrides
+  enabled: true
+  only_on_uncertain: true               # called ONLY when SymPy can't decide (keeps call volume low vs free-tier rate limits)
+  max_concurrency: 4                    # conservative: free variant is rate-limited
+  timeout_s: 60

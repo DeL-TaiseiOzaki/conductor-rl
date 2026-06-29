@@ -21,6 +21,9 @@ venv/
 *.log
 hf_cache/
 
+# Agent harness logs
+.claude/logs/
+
 # OS
 .DS_Store
 Thumbs.db

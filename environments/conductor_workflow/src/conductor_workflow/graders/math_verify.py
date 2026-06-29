@@ -5,18 +5,19 @@ compares to the gold answer via SymPy symbolic equivalence with a
 numerical tolerance fallback.  Handles equivalent forms such as
 ``1/2`` vs ``0.5``, unsimplified expressions, etc.
 
-A ``tiny_v_fallback`` hook is provided as a typed interface for a
-lightweight LLM verifier that can catch false negatives from symbolic
-comparison.  It is **not called** in the current implementation or
-tests (no network) -- it will be wired in the executor phase.
+A ``TinyVFallback`` protocol is provided for a lightweight LLM verifier
+that catches false negatives from symbolic comparison.  The synchronous
+``grade_math`` never calls it (preserving Phase 1 behaviour).  The async
+``grade_math_async`` calls the fallback ONLY when SymPy is uncertain
+(can't parse or disagrees) and ``only_on_uncertain=True`` (default).
 
-Pure (SymPy only), synchronous, no side effects.
+Pure (SymPy only) for the sync path; async path may invoke network.
 """
 
 from __future__ import annotations
 
 import re
-from typing import Protocol
+from typing import Protocol, runtime_checkable
 
 from sympy import Abs, N, Rational, oo, simplify, sympify
 from sympy.core.expr import Expr
@@ -38,16 +39,16 @@ _EQUALS_RE = re.compile(r"=\s*([^\s,;.]+)\s*$", re.MULTILINE)
 # ---------------------------------------------------------------------------
 
 
+@runtime_checkable
 class TinyVFallback(Protocol):
     """Interface for a lightweight LLM verifier fallback.
 
-    Implementations will make network calls to a small model that
-    judges whether two mathematical expressions are equivalent.
-    This is wired in the executor phase; the grader never calls it
-    directly in unit tests.
+    Implementations make async network calls to a judge model that
+    decides whether two mathematical expressions are equivalent.
+    Sync ``grade_math`` never calls it; async ``grade_math_async`` does.
     """
 
-    def check_equivalence(
+    async def check_equivalence(
         self,
         candidate_answer: str,
         gold_answer: str,
@@ -229,6 +230,67 @@ def grade_math(
     if _symbolic_equal(candidate_expr, gold_expr, tolerance=tolerance):
         return 1.0
 
-    # Future: if tiny_v_fallback is not None, call it here for
-    # false-negative recovery.  Deliberately omitted (no network).
+    # Sync path: never calls the fallback (no network).
+    return 0.0
+
+
+# ---------------------------------------------------------------------------
+# Async API (with TinyV fallback)
+# ---------------------------------------------------------------------------
+
+
+async def grade_math_async(
+    candidate_text: str,
+    gold_answer: str,
+    *,
+    tolerance: float = DEFAULT_TOLERANCE,
+    tiny_v_fallback: TinyVFallback | None = None,
+    only_on_uncertain: bool = True,
+) -> float:
+    """Grade a mathematical answer, with optional async LLM fallback.
+
+    The SymPy path runs first (synchronously).  If SymPy confirms
+    equivalence, returns 1.0 immediately.  The fallback is invoked
+    ONLY when SymPy is uncertain (unparseable or disagrees) and
+    ``only_on_uncertain`` is True and a fallback is provided.
+
+    Args:
+        candidate_text: The model's full response text.
+        gold_answer: The gold answer string.
+        tolerance: Numerical tolerance for SymPy comparison.
+        tiny_v_fallback: Optional async LLM fallback verifier.
+        only_on_uncertain: Only call fallback when SymPy can't decide.
+
+    Returns:
+        ``s_correct``: 1.0 if equivalent, else 0.0.
+    """
+    extracted = extract_math_answer(candidate_text)
+    if extracted is None:
+        return 0.0
+
+    candidate_expr = _safe_sympify(extracted)
+    gold_expr = _safe_sympify(gold_answer)
+
+    sympy_uncertain = candidate_expr is None or gold_expr is None
+
+    if not sympy_uncertain:
+        assert candidate_expr is not None  # for type checker
+        assert gold_expr is not None
+        if _symbolic_equal(candidate_expr, gold_expr, tolerance=tolerance):
+            return 1.0
+        # SymPy says not equal -- this is also "uncertain" for fallback
+        sympy_uncertain = True
+
+    # Fallback: call the judge if available and appropriate
+    if tiny_v_fallback is not None and (not only_on_uncertain or sympy_uncertain):
+        try:
+            is_equiv = await tiny_v_fallback.check_equivalence(
+                candidate_answer=extracted,
+                gold_answer=gold_answer,
+            )
+            return 1.0 if is_equiv else 0.0
+        except Exception:
+            # Judge failure -> conservative: not equivalent
+            return 0.0
+
     return 0.0
