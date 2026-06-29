@@ -38,6 +38,10 @@ MAX_RETRIES: int = 3
 INITIAL_BACKOFF_S: float = 1.0
 BACKOFF_MULTIPLIER: float = 2.0
 
+# Hard per-call wall-clock cap for a worker request (seconds). Bounds a
+# hanging/slow provider so it degrades to a transient failure, not a stall.
+DEFAULT_WORKER_TIMEOUT_S: float = 120.0
+
 # HTTP status codes considered transient
 TRANSIENT_STATUS_CODES: frozenset[int] = frozenset({429, 500, 502, 503, 504})
 
@@ -246,6 +250,7 @@ async def call_worker(
     semaphore: asyncio.Semaphore | None = None,
     max_tokens: int = 4096,
     temperature: float = 0.0,
+    timeout_s: float = DEFAULT_WORKER_TIMEOUT_S,
 ) -> WorkerResult:
     """Call a worker model via OpenRouter.
 
@@ -276,13 +281,23 @@ async def call_worker(
     resolved_client = client or build_client()
 
     async def _do_call() -> tuple[str, int, int]:
+        # Hard per-call timeout so a hanging/slow provider (e.g. the :online
+        # web-search variant, or a node with limited egress) becomes a bounded
+        # transient failure (retried, then NOT charged to f_exec) instead of
+        # stalling the whole rollout indefinitely.
         if semaphore is not None:
             async with semaphore:
-                return await _raw_chat_call(
-                    resolved_client, model, prompt, max_tokens, temperature
+                return await asyncio.wait_for(
+                    _raw_chat_call(
+                        resolved_client, model, prompt, max_tokens, temperature
+                    ),
+                    timeout=timeout_s,
                 )
-        return await _raw_chat_call(
-            resolved_client, model, prompt, max_tokens, temperature
+        return await asyncio.wait_for(
+            _raw_chat_call(
+                resolved_client, model, prompt, max_tokens, temperature
+            ),
+            timeout=timeout_s,
         )
 
     result = await _retry_with_backoff(_do_call)

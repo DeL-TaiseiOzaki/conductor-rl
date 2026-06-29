@@ -256,3 +256,74 @@ class TestMockedRollout:
         completion = [{"role": "assistant", "content": "no workflow here"}]
         score = await func(completion=completion)
         assert score == 0.0
+
+
+# ---------------------------------------------------------------------------
+# Pydantic message compatibility (verifiers injects AssistantMessage objects)
+# ---------------------------------------------------------------------------
+
+
+class TestPydanticMessageCompat:
+    """Reward functions work with Pydantic message objects from verifiers."""
+
+    def test_extract_last_assistant_text_from_dict(self) -> None:
+        from conductor_workflow._env_wiring import _extract_last_assistant_text
+
+        msgs = [{"role": "assistant", "content": "hello world"}]
+        assert _extract_last_assistant_text(msgs) == "hello world"
+
+    def test_extract_last_assistant_text_from_pydantic(self) -> None:
+        """Simulates what verifiers passes: Pydantic AssistantMessage objects."""
+        from conductor_workflow._env_wiring import _extract_last_assistant_text
+
+        # Use a simple object with .content attribute (mirrors Pydantic model)
+        class FakeMsg:
+            role = "assistant"
+            content = "hello from pydantic"
+
+        msgs = [FakeMsg()]
+        assert _extract_last_assistant_text(msgs) == "hello from pydantic"
+
+    def test_extract_last_assistant_text_empty(self) -> None:
+        from conductor_workflow._env_wiring import _extract_last_assistant_text
+
+        assert _extract_last_assistant_text([]) == ""
+
+    def test_extract_last_assistant_text_none_content(self) -> None:
+        from conductor_workflow._env_wiring import _extract_last_assistant_text
+
+        class FakeMsg:
+            role = "assistant"
+            content = None
+
+        assert _extract_last_assistant_text([FakeMsg()]) == ""
+
+    def test_extract_last_assistant_text_list_content(self) -> None:
+        """Content may be a list of content parts (multimodal)."""
+        from conductor_workflow._env_wiring import _extract_last_assistant_text
+
+        class FakeTextPart:
+            type = "text"
+            text = "part one"
+
+        msgs = [{"role": "assistant", "content": [FakeTextPart()]}]
+        assert _extract_last_assistant_text(msgs) == "part one"
+
+    @pytest.mark.asyncio
+    async def test_format_reward_with_pydantic_message(self) -> None:
+        """format_reward works when completion contains Pydantic objects."""
+        from conductor_workflow._env_wiring import WorkflowParser
+
+        parser = WorkflowParser()
+        func = parser.get_format_reward_func()
+
+        class FakeMsg:
+            role = "assistant"
+            content = (
+                "```workflow\n"
+                '{"subtasks": ["X"], "model_id": [0], "access_list": [[]]}\n'
+                "```"
+            )
+
+        score = await func(completion=[FakeMsg()])
+        assert score == pytest.approx(1.0, abs=0.05)

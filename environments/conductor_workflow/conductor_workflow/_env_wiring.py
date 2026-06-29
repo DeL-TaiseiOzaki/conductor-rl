@@ -196,10 +196,7 @@ class WorkflowParser(vf.Parser):
             completion: list[dict[str, str]],
             **kwargs: Any,
         ) -> float:
-            text = ""
-            if completion:
-                msg = completion[-1]
-                text = msg.get("content", "") if isinstance(msg, dict) else ""
+            text = _extract_last_assistant_text(completion)
             result = parse_workflow(text)
             return result.f_fmt
 
@@ -212,6 +209,39 @@ class WorkflowParser(vf.Parser):
 
 DAG_RESULT_KEY = "_dag_result"
 PARSE_RESULT_KEY = "_parse_result"
+
+
+def _extract_last_assistant_text(completion: list[Any]) -> str:
+    """Extract text content from the last message in a completion.
+
+    Handles both plain dicts (``{"role": ..., "content": ...}``) and
+    Pydantic message objects (``AssistantMessage``) that verifiers
+    injects into ``score_objects()``.  Content may be a plain string
+    or a list of content parts (multimodal); only text is extracted.
+    """
+    if not completion:
+        return ""
+    msg = completion[-1]
+    # Plain dict path
+    if isinstance(msg, dict):
+        content = msg.get("content", "")
+    else:
+        # Pydantic model or other object with .content attribute
+        content = getattr(msg, "content", "")
+    if content is None:
+        return ""
+    # content may be a list of content parts (e.g. TextContentPart)
+    if isinstance(content, list):
+        parts: list[str] = []
+        for part in content:
+            if isinstance(part, dict):
+                parts.append(part.get("text", ""))
+            elif isinstance(part, str):
+                parts.append(part)
+            else:
+                parts.append(getattr(part, "text", ""))
+        return "".join(parts)
+    return str(content)
 
 
 async def _ensure_dag_executed(
@@ -230,10 +260,7 @@ async def _ensure_dag_executed(
         return state[PARSE_RESULT_KEY], state[DAG_RESULT_KEY]
 
     # Extract text from last assistant message
-    text = ""
-    if completion:
-        msg = completion[-1]
-        text = msg.get("content", "") if isinstance(msg, dict) else ""
+    text = _extract_last_assistant_text(completion)
 
     parse_result = parse_workflow(text)
     state[PARSE_RESULT_KEY] = parse_result
@@ -330,10 +357,7 @@ def _make_reward_functions(
         state: dict[str, Any],
         **kwargs: Any,
     ) -> float:
-        text = ""
-        if completion:
-            msg = completion[-1]
-            text = msg.get("content", "") if isinstance(msg, dict) else ""
+        text = _extract_last_assistant_text(completion)
         pr = parse_workflow(text)
         state[PARSE_RESULT_KEY] = pr
         return pr.f_fmt
