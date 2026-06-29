@@ -1,0 +1,128 @@
+# =============================================================================
+# Conductor-RL GRPO Training Config (Phase 3 — Pilot, Budget-Constrained)
+# =============================================================================
+# Based on: prime-rl v0.6.0  examples/wiki_search/rl.toml (Qwen3-4B, 6+2 split)
+#           examples/reverse_text/rl.toml  (non-LoRA, DefaultRenderer)
+#           examples/Intellect-3.1/rl.toml (multi-env, NCCL, Slurm)
+#
+# Launch:
+#   uv run rl @ configs/rl.toml --output-dir /home/outputs/conductor-rl
+#
+# With Slurm overlay:
+#   uv run rl @ configs/rl.toml @ configs/slurm.toml
+#
+# Dry-run (validate config, generate sbatch, do NOT submit):
+#   uv run rl @ configs/rl.toml @ configs/slurm.toml --dry-run
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# Global
+# ---------------------------------------------------------------------------
+# Budget: 100 steps (not 200) to stay within $50 worker-API spend.
+# Full-scale target: max_steps = 200, batch_size = 256, group_size = 12.
+max_steps = 100
+seq_len = 4096                  # prompt + completion; workflow JSON is verbose
+
+# ---------------------------------------------------------------------------
+# Model
+# ---------------------------------------------------------------------------
+[model]
+name = "Qwen/Qwen3.5-4B"      # HF id, non-gated, exists on the Hub
+
+# ---------------------------------------------------------------------------
+# Deployment (single-node 8xH100)
+# ---------------------------------------------------------------------------
+# GPU split: 6 inference (vLLM DP=6) + 2 trainer (FSDP).
+# Matches the official wiki_search example for Qwen3-4B.
+[deployment]
+num_train_gpus = 2
+num_infer_gpus = 6
+
+# ---------------------------------------------------------------------------
+# Logging
+# ---------------------------------------------------------------------------
+[wandb]
+project = "conductor-rl"
+name = "qwen3.5-4b-grpo-pilot"
+
+# ---------------------------------------------------------------------------
+# Trainer
+# ---------------------------------------------------------------------------
+# Full fine-tuning (no LoRA) — 4B fits in 2xH100 80GB with FSDP.
+# AdamW optimizer, conservative lr for policy gradient stability.
+[trainer.optim]
+lr = 1e-6
+weight_decay = 0.01
+
+# ---------------------------------------------------------------------------
+# Orchestrator (GRPO knobs)
+# ---------------------------------------------------------------------------
+[orchestrator]
+batch_size = 128               # prompts per step (budget: 128 vs full 256)
+group_size = 8                 # rollouts per prompt (budget: 8 vs full 12)
+# oversampling_factor = 1.0   # default; increase if many rollouts fail
+
+[orchestrator.train.sampling]
+max_completion_tokens = 2048   # workflow JSON + reasoning; 2048 is generous
+
+# ---------------------------------------------------------------------------
+# Environment: Conductor-Workflow (Hub)
+# ---------------------------------------------------------------------------
+# Pre-install: prime env install o-taisei/conductor-workflow
+# The env reads OPENROUTER_API_KEY from os.environ at rollout time.
+# The env uses its bundled pilot dataset (201 items, 3 clusters) by default.
+# kwargs passed here go to load_environment(**kwargs).
+[[orchestrator.train.env]]
+id = "o-taisei/conductor-workflow"
+name = "conductor"
+
+# No args needed: defaults load bundled pilot data + all 3 clusters.
+# To filter clusters: args = { clusters = ["science_mcq"] }
+
+# ---------------------------------------------------------------------------
+# Pre-batch filters
+# ---------------------------------------------------------------------------
+# Drop groups where all G rollouts got the same reward (zero advantage signal).
+[[orchestrator.pre_batch_filters]]
+type = "zero_advantage"
+enforce = true
+
+# ---------------------------------------------------------------------------
+# Eval (optional, runs every 25 steps)
+# ---------------------------------------------------------------------------
+# Re-uses the same env for eval with a small sample.
+# Not strictly needed for pilot but useful for monitoring.
+# [orchestrator.eval]
+# interval = 25
+
+# [[orchestrator.eval.env]]
+# id = "o-taisei/conductor-workflow"
+# name = "conductor-eval"
+# args = { clusters = ["science_mcq"] }
+
+# ---------------------------------------------------------------------------
+# Inference (vLLM)
+# ---------------------------------------------------------------------------
+[inference]
+# Model config inherited from [model].name automatically.
+
+[inference.parallel]
+dp = 6                         # data parallelism = number of vLLM replicas
+# tp = 1                       # tensor parallelism (default 1, sufficient for 4B)
+
+# ---------------------------------------------------------------------------
+# Renderer
+# ---------------------------------------------------------------------------
+# Qwen3.5-4B is not in MODEL_RENDERER_MAP — use DefaultRenderer.
+[orchestrator.renderer]
+name = "default"
+
+# ---------------------------------------------------------------------------
+# Checkpointing
+# ---------------------------------------------------------------------------
+# Save at end of training (empty [ckpt] = checkpoint on completion).
+# For more frequent saves:
+#   interval = 25
+#   keep_last = 3
+[ckpt]
+interval = 25

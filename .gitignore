@@ -11,6 +11,7 @@ venv/
 
 # Env / secrets
 .env
+secrets.env
 *.key
 
 # Training artifacts / caches (keep data/pilot committed)

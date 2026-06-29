@@ -1,0 +1,47 @@
+# =============================================================================
+# Conductor-RL Slurm Overlay (single-node, a3megatpa partition)
+# =============================================================================
+# Composed with the base config:
+#   uv run rl @ configs/rl.toml @ configs/slurm.toml
+#
+# Dry-run (validate + generate sbatch without submitting):
+#   uv run rl @ configs/rl.toml @ configs/slurm.toml --dry-run
+#
+# Based on: prime-rl v0.6.0  examples/wiki_search/slurm_rl.toml
+#           examples/multinode/rl.toml (Slurm + multi-node keys)
+#
+# The prime-rl `rl` entrypoint auto-generates an sbatch script from the
+# single_node_rl.sbatch.j2 template when [slurm] is present and
+# [deployment] is single-node. It then submits via `sbatch`.
+# =============================================================================
+
+# Output directory on NFS (shared across nodes).
+# /home is NFS-shared (2.5T) on this cluster.
+output_dir = "outputs/conductor-rl"
+
+[slurm]
+job_name = "conductor-rl"
+# partition = "a3megatpa"     # Uncomment if the cluster requires explicit partition.
+                               # The sbatch template exposes this as an optional Jinja2
+                               # variable; if your cluster's default partition is correct,
+                               # omit this key. a3megatpa has 8 nodes (megatpa-a3meganodeset-[0-7]),
+                               # 8xH100 each.
+# time = "12:00:00"           # Wall-clock limit; uncomment to set.
+# account = ""                # Slurm account; uncomment if required.
+
+# Note: [deployment] in rl.toml is single-node (num_train_gpus + num_infer_gpus).
+# prime-rl uses the single_node_rl.sbatch.j2 template for this case.
+# The template:
+#   1. Sources .env from the project root (secrets: OPENROUTER_API_KEY, WANDB_API_KEY)
+#   2. Activates the venv and runs `uv sync --all-extras`
+#   3. Launches `uv run rl @ <config_path>`
+#
+# For multi-node (throughput scaling), switch to:
+#   [deployment]
+#   type = "multi_node"
+#   num_train_nodes = 1
+#   num_infer_nodes = 1       # or 2-7 for more inference replicas
+#   gpus_per_node = 8
+# and optionally:
+#   [weight_broadcast]
+#   type = "nccl"             # GPU-to-GPU weight transfer (vs filesystem default)

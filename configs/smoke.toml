@@ -1,0 +1,50 @@
+# =============================================================================
+# Conductor-RL Smoke Test Override (debug partition, minimal cost)
+# =============================================================================
+# Validates end-to-end wiring before the real training run.
+# Compose on top of rl.toml (and optionally slurm.toml):
+#
+#   # Local (no Slurm):
+#   uv run rl @ configs/rl.toml @ configs/smoke.toml --output-dir outputs/smoke
+#
+#   # With Slurm (debug partition):
+#   uv run rl @ configs/rl.toml @ configs/smoke.toml --output-dir outputs/smoke
+#
+#   # Dry-run:
+#   uv run rl @ configs/rl.toml @ configs/smoke.toml --dry-run
+#
+# ---------------------------------------------------------------------------
+# Worker-call budget estimate (smoke):
+#   iterations=2, batch=8, G=4, avg_subtasks~2.5, calls_per_subtask=1
+#   Total calls = 2 * 8 * 4 * 2.5 = 160 worker calls
+#   Avg cost/call ~ $0.0003 (DeepSeek V4 Flash, ~500 out tokens)
+#   Total spend ~ 160 * $0.0003 = ~$0.05 (negligible)
+#   With caching (temp=0, many repeated prompts in 201-item pilot): even less.
+# =============================================================================
+
+# Override training length to absolute minimum
+max_steps = 2
+
+[orchestrator]
+batch_size = 8                 # only 8 prompts per step
+group_size = 4                 # 4 rollouts per prompt (minimum for GRPO signal)
+
+# Use only the cheapest cluster (science_mcq: exact-match, no code sandbox,
+# no external math-verify, fewest worker calls per workflow).
+[[orchestrator.train.env]]
+id = "o-taisei/conductor-workflow"
+name = "conductor-smoke"
+args = { clusters = ["science_mcq"] }
+
+# Reduce completion budget for faster turnaround
+[orchestrator.train.sampling]
+max_completion_tokens = 1024
+
+# Slurm: use debug partition (2 nodes, faster scheduling)
+[slurm]
+job_name = "conductor-smoke"
+# partition = "debug"          # Uncomment if debug partition exists and is preferred.
+# time = "00:30:00"            # 30 min is plenty for 2 steps.
+
+# Checkpoint: save at end only (empty [ckpt] = save on completion)
+[ckpt]
