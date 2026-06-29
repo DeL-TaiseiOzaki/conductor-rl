@@ -112,6 +112,12 @@ Package uses a **flat layout** (`environments/conductor_workflow/conductor_workf
 | flat package layout (no `src/`) | `prime env push` only detects top-level `*.py` or immediate `__init__.py` subdir | src-layout | 2026-06-29 |
 | ruff config in `ruff.toml`, not pyproject | `prime env push --auto-bump` rewrites every `version`-like key (incl. `[tool.ruff] target-version`) | keep in pyproject | 2026-06-29 |
 | publish env PUBLIC as `o-taisei/conductor-workflow` | user decision; Hub owner slug = `o-taisei` | PRIVATE | 2026-06-29 |
+| efficiency reward = **GRPO group-relative rank** (not absolute C_ref) | absolute C_ref makes cheapest route always max-bonus regardless of need (adversarial review) | C_ref=strongest-worker-alone | 2026-06-29 |
+| cost = **real token $** (in/out prices); latency = deterministic critical path | exact cost from OpenRouter usage; latency kept deterministic for low RL noise | static cost weights | 2026-06-29 |
+| **worker-call cache** (slug,prompt,max_tokens,temp); hit keeps usage | temp=0 deterministic; saves wallet but reward still reflects deployment cost | no cache | 2026-06-29 |
+| **worker anonymization** in system prompt (no model/lab names) | learn capability-based routing → generalization + train-cheap/deploy-strong | expose model names | 2026-06-29 |
+| **GRPO-direct, no SFT** (format-only SFT as emergency) | templated SFT teaches rigid prior GRPO must unlearn; dense format reward suffices | templated SFT warm-start | 2026-06-29 |
+| **$50 worker-API budget** → downsize GRPO (G=8/batch=128/100 iter, pilot-only, heavy cache) | cost cap; full G=12/256/200 exceeds budget even cached | unconstrained | 2026-06-29 |
 
 ## TODO / Open Questions
 
