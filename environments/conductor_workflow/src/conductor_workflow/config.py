@@ -8,6 +8,7 @@ Pure, synchronous, no side effects.
 
 from __future__ import annotations
 
+import importlib.resources
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -18,14 +19,14 @@ from conductor_workflow.reward import RewardWeights
 from conductor_workflow.workers import WorkerConfig
 
 # ---------------------------------------------------------------------------
-# Paths
+# Packaged asset resolution
 # ---------------------------------------------------------------------------
 
-# environments/conductor_workflow/src/conductor_workflow/config.py -> repo root
-_PACKAGE_DIR = Path(__file__).resolve().parent
-_ENV_DIR = _PACKAGE_DIR.parent.parent  # environments/conductor_workflow/
-_REPO_ROOT = _ENV_DIR.parent.parent  # repo root
-DEFAULT_CONFIG_PATH: Path = _REPO_ROOT / "configs" / "default.yaml"
+
+def _packaged_config_text() -> str:
+    """Read the bundled default.yaml via importlib.resources."""
+    assets = importlib.resources.files("conductor_workflow") / "assets"
+    return (assets / "default.yaml").read_text(encoding="utf-8")
 
 
 # ---------------------------------------------------------------------------
@@ -70,14 +71,19 @@ def load_config(config_path: Path | str | None = None) -> ConductorConfig:
 
     Args:
         config_path: Path to the YAML config file.
-            Defaults to ``configs/default.yaml`` relative to repo root.
+            If *None*, reads the bundled ``assets/default.yaml`` via
+            ``importlib.resources`` (works from an installed wheel).
+            If given, reads the file at that path.
 
     Returns:
         Parsed ``ConductorConfig``.
     """
-    path = Path(config_path) if config_path else DEFAULT_CONFIG_PATH
-    with open(path, encoding="utf-8") as fh:
-        raw: dict[str, Any] = yaml.safe_load(fh)
+    if config_path is not None:
+        path = Path(config_path)
+        with open(path, encoding="utf-8") as fh:
+            raw: dict[str, Any] = yaml.safe_load(fh)
+    else:
+        raw = yaml.safe_load(_packaged_config_text())
 
     # Workers
     workers_raw = raw.get("workers", [])

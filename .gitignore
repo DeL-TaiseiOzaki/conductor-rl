@@ -27,3 +27,7 @@ hf_cache/
 # OS
 .DS_Store
 Thumbs.db
+
+# Build artifacts
+dist/
+*.whl

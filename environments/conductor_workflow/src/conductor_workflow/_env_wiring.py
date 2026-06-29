@@ -10,6 +10,7 @@ pure parser/reward usage does not pull in verifiers/datasets.
 from __future__ import annotations
 
 import asyncio
+import importlib.resources
 import json
 import logging
 from pathlib import Path
@@ -32,12 +33,21 @@ from conductor_workflow.parser import ParseResult, parse_workflow
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# Paths
+# Packaged asset helpers
 # ---------------------------------------------------------------------------
 
-_PACKAGE_DIR = Path(__file__).resolve().parent
-_ENV_DIR = _PACKAGE_DIR.parent.parent
-_REPO_ROOT = _ENV_DIR.parent.parent
+_ASSETS_REF = importlib.resources.files("conductor_workflow") / "assets"
+
+
+def _packaged_pilot_text() -> str:
+    """Read the bundled pilot.jsonl via importlib.resources."""
+    return (_ASSETS_REF / "pilot" / "pilot.jsonl").read_text(encoding="utf-8")
+
+
+def _packaged_system_prompt_text() -> str:
+    """Read the bundled system prompt via importlib.resources."""
+    return (_ASSETS_REF / "conductor_system_prompt.md").read_text(encoding="utf-8")
+
 
 # ---------------------------------------------------------------------------
 # Dataset builder
@@ -51,70 +61,85 @@ CORRECT_THRESHOLD_BY_VERIFIER: dict[str, float] = {
 
 
 def _load_pilot_dataset(
-    dataset_path: str | Path,
-    system_prompt: str,
+    dataset_path: str | Path | None = None,
+    system_prompt: str = "",
     clusters: list[str] | None = None,
 ) -> Dataset:
     """Load pilot JSONL into an HF Dataset with verifiers-compatible columns.
 
     Required output columns: prompt (list[dict]), answer (str), info (dict).
+
+    Args:
+        dataset_path: Explicit path to a JSONL file.  If *None*, reads
+            the bundled ``assets/pilot/pilot.jsonl`` from the installed
+            package via ``importlib.resources``.
+        system_prompt: System prompt text prepended to every row.
+        clusters: Optional cluster filter (e.g. ``["code"]``).
     """
-    path = Path(dataset_path)
-    if not path.is_absolute():
-        path = _REPO_ROOT / path
+    if dataset_path is not None:
+        path = Path(dataset_path)
+        with open(path, encoding="utf-8") as fh:
+            raw_text = fh.read()
+    else:
+        raw_text = _packaged_pilot_text()
 
     rows: list[dict[str, Any]] = []
-    with open(path, encoding="utf-8") as fh:
-        for line in fh:
-            line = line.strip()
-            if not line:
-                continue
-            item = json.loads(line)
+    for line in raw_text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        item = json.loads(line)
 
-            # Filter by cluster if requested
-            if clusters and item.get("cluster") not in clusters:
-                continue
+        # Filter by cluster if requested
+        if clusters and item.get("cluster") not in clusters:
+            continue
 
-            # Build chat-format prompt with system prompt
-            prompt_messages: list[dict[str, str]] = [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": item["prompt"]},
-            ]
+        # Build chat-format prompt with system prompt
+        prompt_messages: list[dict[str, str]] = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": item["prompt"]},
+        ]
 
-            # Info carries all metadata needed by reward functions.
-            # _task_prompt = the original task text (also the user message),
-            # used by the executor to build each worker's context. Stored here
-            # so reward funcs get it from info without re-parsing prompt messages.
-            info: dict[str, Any] = {
-                "id": item.get("id", ""),
-                "cluster": item.get("cluster", ""),
-                "verifier": item.get("verifier", ""),
-                "verifier_spec": item.get("verifier_spec", {}),
-                "gold": item.get("gold"),
-                "difficulty": item.get("difficulty", ""),
-                "_task_prompt": item["prompt"],
+        # Info carries all metadata needed by reward functions.
+        # _task_prompt = the original task text (also the user message),
+        # used by the executor to build each worker's context. Stored here
+        # so reward funcs get it from info without re-parsing prompt messages.
+        info: dict[str, Any] = {
+            "id": item.get("id", ""),
+            "cluster": item.get("cluster", ""),
+            "verifier": item.get("verifier", ""),
+            "verifier_spec": item.get("verifier_spec", {}),
+            "gold": item.get("gold"),
+            "difficulty": item.get("difficulty", ""),
+            "_task_prompt": item["prompt"],
+        }
+
+        rows.append(
+            {
+                "prompt": prompt_messages,
+                "answer": item.get("gold") or "",
+                "info": info,
             }
-
-            rows.append(
-                {
-                    "prompt": prompt_messages,
-                    "answer": item.get("gold") or "",
-                    "info": info,
-                }
-            )
+        )
 
     if not rows:
-        raise ValueError(f"No items loaded from {path} (clusters={clusters})")
+        source = str(dataset_path) if dataset_path is not None else "<bundled>"
+        raise ValueError(f"No items loaded from {source} (clusters={clusters})")
 
     return Dataset.from_list(rows)
 
 
-def _load_system_prompt(prompt_path: str | Path) -> str:
-    """Load the system prompt from a markdown file."""
-    path = Path(prompt_path)
-    if not path.is_absolute():
-        path = _REPO_ROOT / path
-    return path.read_text(encoding="utf-8").strip()
+def _load_system_prompt(prompt_path: str | Path | None = None) -> str:
+    """Load the system prompt from a markdown file.
+
+    Args:
+        prompt_path: Explicit file path.  If *None*, reads the bundled
+            ``assets/conductor_system_prompt.md`` via ``importlib.resources``.
+    """
+    if prompt_path is not None:
+        path = Path(prompt_path)
+        return path.read_text(encoding="utf-8").strip()
+    return _packaged_system_prompt_text().strip()
 
 
 # ---------------------------------------------------------------------------
@@ -400,11 +425,13 @@ def build_environment(**kwargs: Any) -> vf.SingleTurnEnv:
     if not skip_key:
         vf.ensure_keys(["OPENROUTER_API_KEY"])
 
-    # Load system prompt
-    system_prompt = _load_system_prompt(config.system_prompt_path)
+    # Load system prompt — use packaged asset unless an explicit override
+    # path is provided via kwargs or the config specifies an absolute path.
+    prompt_path_override = kwargs.get("prompt_path")
+    system_prompt = _load_system_prompt(prompt_path_override)
 
-    # Load dataset
-    dataset_path = kwargs.get("dataset_path", config.pilot_data_path)
+    # Load dataset — use packaged asset unless caller passes dataset_path.
+    dataset_path = kwargs.get("dataset_path")
     clusters = kwargs.get("clusters", config.clusters)
     dataset = _load_pilot_dataset(dataset_path, system_prompt, clusters)
 
