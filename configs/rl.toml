@@ -113,9 +113,13 @@ dp = 6                         # data parallelism = number of vLLM replicas
 # ---------------------------------------------------------------------------
 # Renderer
 # ---------------------------------------------------------------------------
-# Qwen3.5-4B is not in MODEL_RENDERER_MAP — use DefaultRenderer.
+# Qwen3.5-4B needs its dedicated renderer. Auto-detect matches the tokenizer's
+# exact name_or_path against MODEL_RENDERER_MAP, which misses "Qwen/Qwen3.5-4B",
+# so it falls back to DefaultRenderer — and DefaultRenderer breaks Qwen3.5's chat
+# template ("No user query found in messages", all rollouts ModelError). Set the
+# qwen3.5 renderer explicitly. enable_thinking defaults to None (auto from tokenizer).
 [orchestrator.renderer]
-name = "default"
+name = "qwen3.5"
 
 # ---------------------------------------------------------------------------
 # Checkpointing

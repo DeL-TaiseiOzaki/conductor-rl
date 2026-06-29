@@ -21,12 +21,10 @@ output_dir = "outputs/conductor-rl"
 
 [slurm]
 job_name = "conductor-rl"
-# partition = "a3megatpa"     # Uncomment if the cluster requires explicit partition.
-                               # The sbatch template exposes this as an optional Jinja2
-                               # variable; if your cluster's default partition is correct,
-                               # omit this key. a3megatpa has 8 nodes (megatpa-a3meganodeset-[0-7]),
-                               # 8xH100 each.
-# time = "12:00:00"           # Wall-clock limit; uncomment to set.
+partition = "a3megatpa"        # REQUIRED: sbatch template default is "cluster", which does
+                               # NOT exist here. Partitions: a3megatpa (8x 8xH100, default),
+                               # debug (2 nodes). Nodes megatpa-a3meganodeset-[0-7].
+time = "12:00:00"              # Wall-clock limit.
 # account = ""                # Slurm account; uncomment if required.
 
 # Note: [deployment] in rl.toml is single-node (num_train_gpus + num_infer_gpus).
