@@ -13,6 +13,7 @@ import asyncio
 import importlib.resources
 import json
 import logging
+import os
 from pathlib import Path
 from typing import Any
 
@@ -412,7 +413,6 @@ def build_environment(**kwargs: Any) -> vf.SingleTurnEnv:
         clusters: Filter dataset to specific clusters.
         worker_client: Override AsyncOpenAI client (for testing).
         judge_client: Override AsyncOpenAI client for judge (for testing).
-        skip_key_check: Skip OPENROUTER_API_KEY validation.
 
     Returns:
         Configured ``vf.SingleTurnEnv``.
@@ -420,10 +420,15 @@ def build_environment(**kwargs: Any) -> vf.SingleTurnEnv:
     config_path = kwargs.get("config_path")
     config = load_config(config_path)
 
-    # Optionally validate API key (skip in tests)
-    skip_key = kwargs.get("skip_key_check", False)
-    if not skip_key:
-        vf.ensure_keys(["OPENROUTER_API_KEY"])
+    # Do NOT require OPENROUTER_API_KEY at construction time: the env must
+    # LOAD without it (Hub CI test_load, dataset-only inspection). The key is
+    # only needed when workers are actually called during a rollout, where
+    # workers._get_api_key() raises a clear error. Warn here for local UX.
+    if not os.environ.get("OPENROUTER_API_KEY"):
+        logger.warning(
+            "OPENROUTER_API_KEY not set; env loads but rollouts will fail until "
+            "it is provided (locally: export; on the Hub: env Secrets tab)."
+        )
 
     # Load system prompt — use packaged asset unless an explicit override
     # path is provided via kwargs or the config specifies an absolute path.
